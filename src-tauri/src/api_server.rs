@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
-use std::io::Read;
+use std::io::{Cursor, Read};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -28,6 +28,7 @@ const APP_STATE_CACHE_TTL: Duration = Duration::from_secs(5);
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(1);
 const RATE_LIMIT_MAX_REQUESTS: usize = 120;
 const MAX_IN_FLIGHT_REQUESTS: usize = 64;
+const SSE_ACCEPT: &str = "text/event-stream";
 
 /// API status: 0=starting, 1=running, 2=port_conflict, 3=error
 static API_STATUS: AtomicU8 = AtomicU8::new(0);
@@ -172,6 +173,11 @@ fn process_request(app: AppHandle, mut request: tiny_http::Request) {
         }
     };
 
+    if matches_sse_chat_request(&method, &url, &body) {
+        handle_chat_sse_request(app, request, &url, &body, &headers);
+        return;
+    }
+
     let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         handle_request(&app, &method, &url, &body, &headers)
     }))
@@ -195,6 +201,72 @@ fn err(status: u16, message: impl Into<String>) -> ApiResponse {
     ApiResponse {
         status,
         body: json!({ "ok": false, "error": message.into() }),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatRequest {
+    message: String,
+    #[serde(default)]
+    use_web_search: bool,
+    #[serde(default)]
+    use_any_txt_search: bool,
+    #[serde(default)]
+    stream: bool,
+}
+
+fn validate_chat_request(req: &ChatRequest) -> Result<(), String> {
+    if req.message.trim().is_empty() {
+        return Err("message is required".to_string());
+    }
+    Ok(())
+}
+
+fn matches_sse_chat_request(method: &Method, url: &str, body: &str) -> bool {
+    if method != &Method::Post {
+        return false;
+    }
+    let (path, _) = split_url(url);
+    if !path.ends_with("/chat") {
+        return false;
+    }
+    serde_json::from_str::<ChatRequest>(body)
+        .map(|req| req.stream)
+        .unwrap_or(false)
+}
+
+fn format_sse_event(event: &str, payload: Value) -> String {
+    format!("event: {event}\ndata: {payload}\n\n")
+}
+
+struct ChannelReader {
+    rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    current: Cursor<Vec<u8>>,
+}
+
+impl ChannelReader {
+    fn new(rx: std::sync::mpsc::Receiver<Vec<u8>>) -> Self {
+        Self {
+            rx,
+            current: Cursor::new(Vec::new()),
+        }
+    }
+}
+
+impl Read for ChannelReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            let pos = self.current.position() as usize;
+            let current = self.current.get_ref();
+            if pos < current.len() {
+                return self.current.read(buf);
+            }
+            match self.rx.recv() {
+                Ok(next) => self.current = Cursor::new(next),
+                Err(_) => return Ok(0),
+            }
+        }
     }
 }
 
@@ -260,10 +332,7 @@ fn handle_request(
         (&Method::Post, ["projects", project_id, "sources", "rescan"]) => {
             handle_rescan(app, project_id)
         }
-        (&Method::Post, ["projects", project_id, "chat"]) => {
-            let _ = project_id;
-            err(501, "Chat API is not implemented in the local Rust API server yet. The existing chat/RAG pipeline currently lives in the WebView; expose it after moving the shared chat pipeline behind a backend command.")
-        }
+        (&Method::Post, ["projects", project_id, "chat"]) => handle_chat(app, project_id, body),
         _ => err(404, "Not found"),
     }
 }
@@ -942,6 +1011,287 @@ fn relative_to_project(project_path: &str, path: &Path) -> String {
         .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"))
 }
 
+fn handle_chat(app: &AppHandle, project_id: &str, body: &str) -> ApiResponse {
+    let project = match resolve_project(app, project_id) {
+        Ok(project) => project,
+        Err(e) => return err(404, e),
+    };
+    let req: ChatRequest = match serde_json::from_str(body) {
+        Ok(req) => req,
+        Err(e) => return err(400, format!("Invalid JSON: {e}")),
+    };
+    if let Err(message) = validate_chat_request(&req) {
+        return err(400, message);
+    }
+    if req.stream {
+        return err(400, "Streaming chat requires an SSE client");
+    }
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let bridge_req = commands::chat::ApiChatBridgeRequest {
+        request_id: request_id.clone(),
+        project_id: project.id.clone(),
+        project_path: project.path.clone(),
+        project_name: project.name.clone(),
+        message: req.message,
+        use_web_search: req.use_web_search,
+        use_any_txt_search: req.use_any_txt_search,
+        stream: false,
+    };
+    let rx = match commands::chat::dispatch_api_chat_request(app, bridge_req) {
+        Ok(rx) => rx,
+        Err(e) => return err(500, e),
+    };
+
+    let mut response_text = String::new();
+    let mut references = Vec::<commands::chat::ChatReference>::new();
+    let mut warnings = Vec::<String>::new();
+
+    loop {
+        match rx.recv_timeout(commands::chat::API_CHAT_TIMEOUT) {
+            Ok(commands::chat::ApiChatBridgeEvent::Context {
+                references: next_refs,
+                warnings: next_warnings,
+            }) => {
+                references = next_refs;
+                warnings = next_warnings;
+            }
+            Ok(commands::chat::ApiChatBridgeEvent::Token { text }) => {
+                response_text.push_str(&text);
+            }
+            Ok(commands::chat::ApiChatBridgeEvent::Done {
+                response,
+                references: done_refs,
+                warnings: done_warnings,
+            }) => {
+                let final_refs = if done_refs.is_empty() {
+                    references
+                } else {
+                    done_refs
+                };
+                let final_warnings = if done_warnings.is_empty() {
+                    warnings
+                } else {
+                    done_warnings
+                };
+                return ok(json!({
+                    "ok": true,
+                    "response": if response.is_empty() { response_text } else { response },
+                    "references": final_refs,
+                    "warnings": final_warnings,
+                }));
+            }
+            Ok(commands::chat::ApiChatBridgeEvent::Error { error }) => {
+                return err(500, error);
+            }
+            Ok(commands::chat::ApiChatBridgeEvent::Start)
+            | Ok(commands::chat::ApiChatBridgeEvent::Reasoning { .. }) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                commands::chat::cancel_pending_api_chat_request(app, &request_id);
+                return err(504, "Chat request timed out waiting for the WebView pipeline");
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                commands::chat::cancel_pending_api_chat_request(app, &request_id);
+                return err(500, "Chat bridge disconnected before returning a result");
+            }
+        }
+    }
+}
+
+fn handle_chat_sse_request(
+    app: AppHandle,
+    request: tiny_http::Request,
+    url: &str,
+    body: &str,
+    headers: &[(String, String)],
+) {
+    let response = match prepare_chat_sse(&app, url, body, headers) {
+        Ok(response) => response,
+        Err(resp) => {
+            respond_json(request, resp.status, resp.body);
+            return;
+        }
+    };
+    let _ = request.respond(response);
+}
+
+fn prepare_chat_sse(
+    app: &AppHandle,
+    url: &str,
+    body: &str,
+    headers: &[(String, String)],
+) -> Result<Response<ChannelReader>, ApiResponse> {
+    let (path, query) = split_url(url);
+    if path == "/health" || path == format!("{API_PREFIX}/health") {
+        return Err(err(404, "Not found"));
+    }
+    if !path.starts_with(API_PREFIX) {
+        return Err(err(404, "Not found"));
+    }
+    if !api_enabled(app) {
+        return Err(err(503, "API server is disabled in Settings -> API Server"));
+    }
+    if !is_authorized(app, query, headers) {
+        return Err(err(401, "Unauthorized"));
+    }
+
+    let parts: Vec<&str> = path
+        .trim_start_matches(API_PREFIX)
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    let ["projects", project_id, "chat"] = parts.as_slice() else {
+        return Err(err(404, "Not found"));
+    };
+
+    let project = resolve_project(app, project_id).map_err(|e| err(404, e))?;
+    let req: ChatRequest =
+        serde_json::from_str(body).map_err(|e| err(400, format!("Invalid JSON: {e}")))?;
+    validate_chat_request(&req).map_err(|message| err(400, message))?;
+    if !req.stream {
+        return Err(err(400, "Set stream=true for SSE chat responses"));
+    }
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let bridge_req = commands::chat::ApiChatBridgeRequest {
+        request_id: request_id.clone(),
+        project_id: project.id.clone(),
+        project_path: project.path.clone(),
+        project_name: project.name.clone(),
+        message: req.message,
+        use_web_search: req.use_web_search,
+        use_any_txt_search: req.use_any_txt_search,
+        stream: true,
+    };
+    let rx = commands::chat::dispatch_api_chat_request(app, bridge_req).map_err(|e| err(500, e))?;
+    let (chunk_tx, chunk_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+
+    let app_for_stream = app.clone();
+    thread::spawn(move || {
+        let mut should_cancel = true;
+        loop {
+            match rx.recv_timeout(commands::chat::API_CHAT_TIMEOUT) {
+                Ok(commands::chat::ApiChatBridgeEvent::Start) => {
+                    let payload = json!({
+                        "ok": true,
+                        "projectId": project.id,
+                        "mode": "chat",
+                    });
+                    if chunk_tx
+                        .send(format_sse_event("start", payload).into_bytes())
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Ok(commands::chat::ApiChatBridgeEvent::Context {
+                    references,
+                    warnings,
+                }) => {
+                    if chunk_tx
+                        .send(
+                            format_sse_event(
+                                "context",
+                                json!({ "references": references, "warnings": warnings }),
+                            )
+                            .into_bytes(),
+                        )
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Ok(commands::chat::ApiChatBridgeEvent::Token { text }) => {
+                    if chunk_tx
+                        .send(format_sse_event("token", json!({ "text": text })).into_bytes())
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Ok(commands::chat::ApiChatBridgeEvent::Reasoning { text }) => {
+                    if chunk_tx
+                        .send(format_sse_event("reasoning", json!({ "text": text })).into_bytes())
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Ok(commands::chat::ApiChatBridgeEvent::Done {
+                    response,
+                    references,
+                    warnings: _,
+                }) => {
+                    let _ = chunk_tx.send(
+                        format_sse_event(
+                            "done",
+                            json!({ "ok": true, "response": response, "references": references }),
+                        )
+                        .into_bytes(),
+                    );
+                    should_cancel = false;
+                    break;
+                }
+                Ok(commands::chat::ApiChatBridgeEvent::Error { error }) => {
+                    let _ = chunk_tx.send(
+                        format_sse_event("error", json!({ "ok": false, "error": error }))
+                            .into_bytes(),
+                    );
+                    should_cancel = false;
+                    break;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    let _ = chunk_tx.send(
+                        format_sse_event(
+                            "error",
+                            json!({
+                                "ok": false,
+                                "error": "Chat request timed out waiting for the WebView pipeline",
+                            }),
+                        )
+                        .into_bytes(),
+                    );
+                    break;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = chunk_tx.send(
+                        format_sse_event(
+                            "error",
+                            json!({
+                                "ok": false,
+                                "error": "Chat bridge disconnected before the stream completed",
+                            }),
+                        )
+                        .into_bytes(),
+                    );
+                    break;
+                }
+            }
+        }
+        if should_cancel {
+            commands::chat::cancel_pending_api_chat_request(&app_for_stream, &request_id);
+        }
+    });
+
+    let mut response = Response::new(
+        StatusCode(200),
+        Vec::new(),
+        ChannelReader::new(chunk_rx),
+        None,
+        None,
+    );
+    response.add_header(Header::from_bytes("Content-Type", SSE_ACCEPT).unwrap());
+    response.add_header(Header::from_bytes("Cache-Control", "no-cache").unwrap());
+    response.add_header(Header::from_bytes("Connection", "keep-alive").unwrap());
+    response.add_header(Header::from_bytes("X-Accel-Buffering", "no").unwrap());
+    for header in cors_headers().into_iter().filter(|header| header.field.as_str() != "Content-Type")
+    {
+        response.add_header(header);
+    }
+    Ok(response)
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SearchRequest {
@@ -1379,5 +1729,34 @@ mod tests {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         assert!(!mcp_enabled_missing);
+    }
+
+    #[test]
+    fn chat_request_parses_stream_flag_defaults() {
+        let req: ChatRequest = serde_json::from_str(r#"{"message":"What is RAG?"}"#).unwrap();
+        assert_eq!(req.message, "What is RAG?");
+        assert!(!req.use_web_search);
+        assert!(!req.use_any_txt_search);
+        assert!(!req.stream);
+    }
+
+    #[test]
+    fn chat_request_rejects_blank_message() {
+        let req = ChatRequest {
+            message: "   ".to_string(),
+            use_web_search: false,
+            use_any_txt_search: false,
+            stream: false,
+        };
+        assert_eq!(
+            validate_chat_request(&req).unwrap_err(),
+            "message is required"
+        );
+    }
+
+    #[test]
+    fn sse_event_formats_name_and_json_payload() {
+        let out = format_sse_event("token", json!({ "text": "RAG " }));
+        assert_eq!(out, "event: token\ndata: {\"text\":\"RAG \"}\n\n");
     }
 }

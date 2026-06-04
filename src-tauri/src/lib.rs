@@ -178,6 +178,7 @@ pub fn run() {
             // frontend-generated stream id. Populated by claude_cli_spawn,
             // drained on process exit or by claude_cli_kill.
             app.manage(commands::claude_cli::ClaudeCliState::default());
+            app.manage(commands::chat::ApiChatBridgeState::default());
             app.manage(commands::codex_cli::CodexCliState::default());
             app.manage(commands::file_sync::FileSyncState::default());
             app.manage(CloseBehaviorState(Mutex::new("minimize".to_string())));
@@ -212,6 +213,7 @@ pub fn run() {
             commands::project::open_project,
             commands::project::open_project_folder,
             commands::search::search_project,
+            commands::chat::api_chat_bridge_push_event,
             clip_server_status,
             api_server_status,
             api_server_reload_config,

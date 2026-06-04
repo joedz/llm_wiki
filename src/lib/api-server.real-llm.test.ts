@@ -596,16 +596,57 @@ describe.skipIf(!ENABLED)("local API v1 against real project", () => {
   )
 
   it(
-    "reports chat as not implemented in API v1",
+    "returns a real non-streaming chat response",
     async (ctx) => {
       ensureServer(ctx)
       await requireUsableApi()
-      const chatResp = await api<ApiEnvelope>(`/api/v1/projects/${PROJECT_ID}/chat`, {
+      const chatResp = await api<
+        ApiEnvelope & {
+          response: string
+          references: Array<{ path: string; kind: string }>
+        }
+      >(`/api/v1/projects/${PROJECT_ID}/chat`, {
         method: "POST",
-        body: JSON.stringify({ message: "hello" }),
+        body: JSON.stringify({
+          message: "What does this wiki say about itself?",
+          useWebSearch: false,
+          useAnyTxtSearch: false,
+          stream: false,
+        }),
       })
-      expect(chatResp.status).toBe(501)
-      expect(chatResp.body.ok).toBe(false)
+      expect(chatResp.status).toBe(200)
+      expect(chatResp.body.ok).toBe(true)
+      expect(typeof chatResp.body.response).toBe("string")
+      expect(Array.isArray(chatResp.body.references)).toBe(true)
+    },
+    TEST_TIMEOUT_MS,
+  )
+
+  it(
+    "streams SSE chat events",
+    async (ctx) => {
+      ensureServer(ctx)
+      await requireUsableApi()
+      const response = await fetch(endpoint(`/api/v1/projects/${PROJECT_ID}/chat`), {
+        method: "POST",
+        headers: {
+          ...authHeaders(),
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+        },
+        body: JSON.stringify({
+          message: "What does this wiki say about itself?",
+          useWebSearch: false,
+          useAnyTxtSearch: false,
+          stream: true,
+        }),
+      })
+
+      expect(response.status).toBe(200)
+      expect(response.headers.get("content-type")).toContain("text/event-stream")
+      const body = await response.text()
+      expect(body).toContain("event: start")
+      expect(body).toContain("event: done")
     },
     TEST_TIMEOUT_MS,
   )
