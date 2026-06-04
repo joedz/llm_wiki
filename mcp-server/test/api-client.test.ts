@@ -67,6 +67,46 @@ test("search posts JSON body to current project", async () => {
   assert.equal(results.results[0]?.vectorScore, 0.9)
 })
 
+test("chat posts non-streaming body and parses references", async () => {
+  let body = ""
+  let url = ""
+  const fetchImpl = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    url = String(input)
+    body = String(init?.body ?? "")
+    return new Response(JSON.stringify({
+      ok: true,
+      response: "RAG stands for retrieval augmented generation [1].",
+      references: [
+        {
+          title: "RAG",
+          path: "wiki/concepts/rag.md",
+          kind: "wiki",
+          snippet: "RAG stands for retrieval augmented generation.",
+        },
+      ],
+      warnings: ["web search unavailable"],
+    }), { status: 200 })
+  }
+
+  const client = new LlmWikiApiClient({ fetchImpl })
+  const result = await client.chat("current", "What is RAG?", {
+    useWebSearch: true,
+    useAnyTxtSearch: false,
+  })
+
+  assert.equal(url, "http://127.0.0.1:19828/api/v1/projects/current/chat")
+  assert.deepEqual(JSON.parse(body), {
+    message: "What is RAG?",
+    useWebSearch: true,
+    useAnyTxtSearch: false,
+    stream: false,
+  })
+  assert.equal(result.response, "RAG stands for retrieval augmented generation [1].")
+  assert.equal(result.references[0]?.path, "wiki/concepts/rag.md")
+  assert.equal(result.references[0]?.kind, "wiki")
+  assert.deepEqual(result.warnings, ["web search unavailable"])
+})
+
 test("graph parses nodeType from API graph nodes", async () => {
   const fetchImpl = async (): Promise<Response> => (
     new Response(JSON.stringify({

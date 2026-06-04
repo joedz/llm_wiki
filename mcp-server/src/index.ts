@@ -7,7 +7,13 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from "@modelcontextprotocol/sdk/types.js"
-import { LlmWikiApiClient, type ApiFileNode, type ApiGraphNode, type ApiSearchResult } from "./api-client.js"
+import {
+  LlmWikiApiClient,
+  type ApiChatReference,
+  type ApiFileNode,
+  type ApiGraphNode,
+  type ApiSearchResult,
+} from "./api-client.js"
 
 const VERSION = "0.4.20"
 const DEFAULT_PROJECT_ID = "current"
@@ -83,6 +89,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "llm_wiki_chat",
+      description: "Ask the current LLM Wiki project a question through the desktop app's shared chat/RAG pipeline.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          project_id: { type: "string", description: "Project UUID, project path, or 'current'. Defaults to current." },
+          message: { type: "string", description: "User message or question to ask the wiki assistant." },
+          use_web_search: { type: "boolean", description: "Whether to allow the desktop app's configured web search provider." },
+          use_any_txt_search: { type: "boolean", description: "Whether to allow the desktop app's configured AnyTXT provider." },
+        },
+        required: ["message"],
+        additionalProperties: false,
+      },
+    },
+    {
       name: "llm_wiki_graph",
       description: "Query the project knowledge graph through the desktop app API.",
       inputSchema: {
@@ -148,6 +169,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           includeContent: boolArg(args.include_content, false),
         })
         return textResult(formatSearchResults(query, search))
+      }
+      case "llm_wiki_chat": {
+        await assertMcpEnabled()
+        const message = stringArg(args.message, "message")
+        const chat = await client.chat(projectId(args), message, {
+          useWebSearch: boolArg(args.use_web_search, false),
+          useAnyTxtSearch: boolArg(args.use_any_txt_search, false),
+        })
+        return textResult(formatChatResponse(message, chat))
       }
       case "llm_wiki_graph": {
         await assertMcpEnabled()
@@ -295,6 +325,40 @@ function formatGraph(nodes: ApiGraphNode[], edges: Array<{ source: string; targe
       .slice(0, 30)
       .map((node) => `- ${node.label} (${node.type}, ${node.linkCount ?? 0} links)${node.path ? ` — ${node.path}` : ""}`),
   ]
+  return lines.join("\n")
+}
+
+function formatChatResponse(
+  message: string,
+  chat: { response: string; references: ApiChatReference[]; warnings?: string[] },
+): string {
+  const lines = [
+    `# Chat response`,
+    "",
+    `Question: ${message}`,
+    "",
+    chat.response || "(empty response)",
+  ]
+
+  if (chat.references.length > 0) {
+    lines.push("", "## References")
+    for (const [index, ref] of chat.references.entries()) {
+      const extras = [
+        ref.kind ? `kind=${ref.kind}` : null,
+        ref.source ? `source=${ref.source}` : null,
+        ref.url ? `url=${ref.url}` : null,
+      ].filter(Boolean)
+      lines.push(`- [${index + 1}] ${ref.title} - ${ref.path}${extras.length > 0 ? ` (${extras.join(", ")})` : ""}`)
+      if (ref.snippet) {
+        lines.push(`  Snippet: ${truncateText(ref.snippet, 800)}`)
+      }
+    }
+  }
+
+  if (chat.warnings && chat.warnings.length > 0) {
+    lines.push("", "## Warnings", ...chat.warnings.map((warning) => `- ${warning}`))
+  }
+
   return lines.join("\n")
 }
 

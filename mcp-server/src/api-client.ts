@@ -37,6 +37,21 @@ export interface ApiSearchResponse {
   vectorHits?: number
 }
 
+export interface ApiChatReference {
+  title: string
+  path: string
+  kind: string
+  source?: string
+  url?: string
+  snippet?: string
+}
+
+export interface ApiChatResponse {
+  response: string
+  references: ApiChatReference[]
+  warnings?: string[]
+}
+
 export interface ApiGraphNode {
   id: string
   label: string
@@ -168,6 +183,29 @@ export class LlmWikiApiClient {
     })
   }
 
+  async chat(
+    projectId = "current",
+    message: string,
+    options: { useWebSearch?: boolean; useAnyTxtSearch?: boolean } = {},
+  ): Promise<ApiChatResponse> {
+    const json = await this.request(`/projects/${encodeURIComponent(projectId)}/chat`, {
+      method: "POST",
+      body: {
+        message,
+        useWebSearch: options.useWebSearch,
+        useAnyTxtSearch: options.useAnyTxtSearch,
+        stream: false,
+      },
+    })
+    return {
+      response: typeof json.response === "string" ? json.response : "",
+      references: Array.isArray(json.references) ? json.references.map(parseChatReference) : [],
+      warnings: Array.isArray(json.warnings)
+        ? json.warnings.filter((value): value is string => typeof value === "string")
+        : undefined,
+    }
+  }
+
   private async request(path: string, options: { method?: "GET" | "POST"; body?: unknown; auth?: boolean } = {}): Promise<Record<string, unknown>> {
     const url = `${this.baseUrl}${apiPath(path)}`
     const headers: Record<string, string> = { Accept: "application/json" }
@@ -258,5 +296,17 @@ function parseGraphEdge(value: unknown): ApiGraphEdge {
     source: String(obj.source ?? ""),
     target: String(obj.target ?? ""),
     weight: numberOrUndefined(obj.weight),
+  }
+}
+
+function parseChatReference(value: unknown): ApiChatReference {
+  const obj = requireObject(value, "chat reference")
+  return {
+    title: String(obj.title ?? ""),
+    path: String(obj.path ?? ""),
+    kind: String(obj.kind ?? ""),
+    source: typeof obj.source === "string" ? obj.source : undefined,
+    url: typeof obj.url === "string" ? obj.url : undefined,
+    snippet: typeof obj.snippet === "string" ? obj.snippet : undefined,
   }
 }
