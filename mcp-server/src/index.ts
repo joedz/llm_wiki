@@ -128,6 +128,67 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         additionalProperties: false,
       },
     },
+    {
+      name: "push_document",
+      description: "Submit text content for review before adding to the wiki",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Target path relative to raw/sources, e.g. 'my-docs/report.md'" },
+          content: { type: "string", description: "The text content to submit" },
+          notes: { type: "string", description: "Optional notes about this content" },
+        },
+        required: ["path", "content"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "get_push_queue",
+      description: "Get all pending items in the push review queue",
+      inputSchema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "approve_push",
+      description: "Approve a push review item — it will be written to raw/sources and ingested",
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "The push item ID" },
+        },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "reject_push",
+      description: "Reject a push review item — it will be discarded",
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "The push item ID" },
+        },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "update_push",
+      description: "Update a push review item's content or review notes",
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "The push item ID" },
+          content: { type: "string", description: "New content (optional)" },
+          reviewNotes: { type: "string", description: "Reviewer notes (optional)" },
+        },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
   ],
 }))
 
@@ -191,6 +252,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "llm_wiki_rescan_sources": {
         await assertMcpEnabled()
         return textResult(JSON.stringify(await client.rescan(projectId(args)), null, 2))
+      }
+      case "push_document": {
+        await assertMcpEnabled()
+        const path = stringArg(args.path, "path")
+        const content = stringArg(args.content, "content")
+        const notes = optionalStringArg(args.notes)
+        return textResult(JSON.stringify(await client.pushDocument(path, content, notes), null, 2))
+      }
+      case "get_push_queue": {
+        await assertMcpEnabled()
+        return textResult(JSON.stringify(await client.getPushQueue(), null, 2))
+      }
+      case "approve_push": {
+        await assertMcpEnabled()
+        const id = stringArg(args.id, "id")
+        return textResult(JSON.stringify(await client.approvePush(id), null, 2))
+      }
+      case "reject_push": {
+        await assertMcpEnabled()
+        const id = stringArg(args.id, "id")
+        return textResult(JSON.stringify(await client.rejectPush(id), null, 2))
+      }
+      case "update_push": {
+        await assertMcpEnabled()
+        const id = stringArg(args.id, "id")
+        const content = optionalStringArg(args.content)
+        const reviewNotes = optionalStringArg(args.reviewNotes)
+        return textResult(JSON.stringify(await client.updatePush(id, content, reviewNotes), null, 2))
       }
       default:
         throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${request.params.name}`)

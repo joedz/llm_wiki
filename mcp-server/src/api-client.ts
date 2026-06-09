@@ -177,9 +177,48 @@ export class LlmWikiApiClient {
     }
   }
 
-  async rescan(projectId = "current"): Promise<Record<string, unknown>> {
+async rescan(projectId = "current"): Promise<Record<string, unknown>> {
     return this.request(`/projects/${encodeURIComponent(projectId)}/sources/rescan`, {
       method: "POST",
+    })
+  }
+
+  async pushDocument(path: string, content: string, notes?: string): Promise<{ id: string; path: string }> {
+    const json = await this.request("/push", {
+      method: "POST",
+      body: { path, content, notes },
+    })
+    return { id: String(json.id ?? ""), path: String(json.path ?? path) }
+  }
+
+  async getPushQueue(): Promise<{ items: Array<{ id: string; path: string; content: string; notes?: string; createdAt: string }> }> {
+    const json = await this.request("/push/queue")
+    return {
+      items: Array.isArray(json.items) ? json.items.map((item: unknown) => {
+        const obj = requireObject(item, "push queue item")
+        return {
+          id: String(obj.id ?? ""),
+          path: String(obj.path ?? ""),
+          content: String(obj.content ?? ""),
+          notes: typeof obj.notes === "string" ? obj.notes : undefined,
+          createdAt: String(obj.createdAt ?? obj.created_at ?? ""),
+        }
+      }) : [],
+    }
+  }
+
+  async approvePush(id: string): Promise<Record<string, unknown>> {
+    return this.request(`/push/${encodeURIComponent(id)}/approve`, { method: "POST" })
+  }
+
+  async rejectPush(id: string): Promise<Record<string, unknown>> {
+    return this.request(`/push/${encodeURIComponent(id)}/reject`, { method: "POST" })
+  }
+
+  async updatePush(id: string, content?: string, reviewNotes?: string): Promise<Record<string, unknown>> {
+    return this.request(`/push/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: { content, reviewNotes },
     })
   }
 
@@ -206,7 +245,7 @@ export class LlmWikiApiClient {
     }
   }
 
-  private async request(path: string, options: { method?: "GET" | "POST"; body?: unknown; auth?: boolean } = {}): Promise<Record<string, unknown>> {
+  private async request(path: string, options: { method?: "GET" | "POST" | "PATCH"; body?: unknown; auth?: boolean } = {}): Promise<Record<string, unknown>> {
     const url = `${this.baseUrl}${apiPath(path)}`
     const headers: Record<string, string> = { Accept: "application/json" }
     if (options.auth !== false && this.token?.trim()) {
