@@ -1,12 +1,13 @@
 import { useState, useEffect } from "react"
 import {
-  FileText, FolderOpen, Search, Network, ClipboardCheck, Settings, ArrowLeftRight, ClipboardList, Globe,
+  FileText, FolderOpen, Search, Network, ClipboardCheck, Settings, ArrowLeftRight, ClipboardList, Globe, Send,
 } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { useWikiStore } from "@/stores/wiki-store"
 import { useReviewStore } from "@/stores/review-store"
 import { useResearchStore } from "@/stores/research-store"
 import { useUpdateStore, hasAvailableUpdate } from "@/stores/update-store"
+import { usePushReviewStore } from "@/stores/push-review-store"
 import { useTranslation } from "react-i18next"
 import logoImg from "@/assets/logo.jpg"
 import type { WikiState } from "@/stores/wiki-store"
@@ -20,6 +21,7 @@ const NAV_ITEMS: { view: NavView; icon: typeof FileText; labelKey: string }[] = 
   { view: "graph", icon: Network, labelKey: "nav.graph" },
   { view: "lint", icon: ClipboardCheck, labelKey: "nav.lint" },
   { view: "review", icon: ClipboardList, labelKey: "nav.review" },
+  { view: "pushReview", icon: Send, labelKey: "nav.pushReview" },
 ]
 
 interface IconSidebarProps {
@@ -31,6 +33,7 @@ export function IconSidebar({ onSwitchProject }: IconSidebarProps) {
   const activeView = useWikiStore((s) => s.activeView)
   const setActiveView = useWikiStore((s) => s.setActiveView)
   const pendingCount = useReviewStore((s) => s.items.filter((i) => !i.resolved).length)
+  const pushReviewPendingCount = usePushReviewStore((s) => s.items.filter((i) => i.status === "pending").length)
   const researchPanelOpen = useResearchStore((s) => s.panelOpen)
   const researchActiveCount = useResearchStore((s) => s.tasks.filter((t) => t.status !== "done" && t.status !== "error").length)
   const toggleResearchPanel = useResearchStore((s) => s.setPanelOpen)
@@ -89,10 +92,16 @@ export function IconSidebar({ onSwitchProject }: IconSidebarProps) {
                     {pendingCount > 99 ? "99+" : pendingCount}
                   </span>
                 )}
+                {view === "pushReview" && pushReviewPendingCount > 0 && (
+                  <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-bold text-primary-foreground">
+                    {pushReviewPendingCount > 99 ? "99+" : pushReviewPendingCount}
+                  </span>
+                )}
               </TooltipTrigger>
               <TooltipContent side="right">
                 {t(labelKey)}
                 {view === "review" && pendingCount > 0 && ` (${pendingCount})`}
+                {view === "pushReview" && pushReviewPendingCount > 0 && ` (${pushReviewPendingCount})`}
               </TooltipContent>
             </Tooltip>
           ))}

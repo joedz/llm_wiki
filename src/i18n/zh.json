@@ -10,6 +10,7 @@
     "graph": "关系图",
     "lint": "检查",
     "review": "待审阅",
+    "pushReview": "推送审阅",
     "settings": "设置",
     "switchProject": "切换项目",
     "updateAvailable": "有可用更新",
@@ -184,6 +185,18 @@
     "clearResolved": "清除已解决",
     "allClear": "一切正常，无需审阅",
     "resolvedDivider": "— 已解决 —"
+  },
+  "pushReview": {
+    "title": "推送审阅",
+    "empty": "没有待处理的条目",
+    "approve": "批准",
+    "reject": "拒绝",
+    "edit": "编辑",
+    "addNotes": "添加备注",
+    "addNotesPlaceholder": "请输入备注...",
+    "reviewNotesPlaceholder": "请输入审阅备注...",
+    "save": "保存",
+    "cancel": "取消"
   },
   "settings": {
     "title": "设置",

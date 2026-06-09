@@ -10,6 +10,7 @@
     "graph": "Graph",
     "lint": "Lint",
     "review": "Review",
+    "pushReview": "Push Review",
     "settings": "Settings",
     "switchProject": "Switch Project",
     "updateAvailable": "Update available",
@@ -182,8 +183,20 @@
   "review": {
     "title": "Review",
     "clearResolved": "Clear resolved",
-    "allClear": "All clear — nothing to review",
+       "allClear": "All clear — nothing to review",
     "resolvedDivider": "— Resolved —"
+  },
+  "pushReview": {
+    "title": "Push Review",
+    "empty": "No pending items",
+    "approve": "Approve",
+    "reject": "Reject",
+    "edit": "Edit",
+    "addNotes": "Add Notes",
+    "addNotesPlaceholder": "Enter your notes...",
+    "reviewNotesPlaceholder": "Enter review notes...",
+    "save": "Save",
+    "cancel": "Cancel"
   },
   "settings": {
     "title": "Settings",
