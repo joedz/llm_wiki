@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 use walkdir::WalkDir;
 
@@ -310,7 +310,7 @@ fn handle_request(
     if !is_authorized(app, query, headers) {
         return err(401, "Unauthorized");
     }
-    if !matches!(method, &Method::Get | &Method::Post) {
+    if !matches!(method, &Method::Get | &Method::Post | &Method::Patch) {
         return err(405, "Method not allowed");
     }
 
@@ -333,6 +333,11 @@ fn handle_request(
             handle_rescan(app, project_id)
         }
         (&Method::Post, ["projects", project_id, "chat"]) => handle_chat(app, project_id, body),
+        (&Method::Post, ["push"]) => handle_push_submit(app, body),
+        (&Method::Get, ["push", "queue"]) => handle_push_queue(app),
+        (&Method::Post, ["push", id, "approve"]) => handle_push_approve(app, id, body),
+        (&Method::Post, ["push", id, "reject"]) => handle_push_reject(app, id, body),
+        (&Method::Patch, ["push", id]) => handle_push_update(app, id, body),
         _ => err(404, "Not found"),
     }
 }
@@ -398,7 +403,7 @@ fn respond_json(request: tiny_http::Request, status: u16, body: Value) {
 fn cors_headers() -> Vec<Header> {
     vec![
         Header::from_bytes("Access-Control-Allow-Origin", "*").unwrap(),
-        Header::from_bytes("Access-Control-Allow-Methods", "GET, POST, OPTIONS").unwrap(),
+        Header::from_bytes("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS").unwrap(),
         Header::from_bytes(
             "Access-Control-Allow-Headers",
             "Content-Type, Authorization, X-LLM-Wiki-Token",
@@ -1531,6 +1536,126 @@ fn handle_rescan(app: &AppHandle, project_id: &str) -> ApiResponse {
         Ok(result) => ok(json!({ "ok": true, "projectId": project.id, "result": result })),
         Err(e) => err(500, e),
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PushItem {
+    id: String,
+    path: String,
+    content: String,
+    notes: String,
+    submitted_by: String,
+    status: String,
+    review_notes: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PushSubmitRequest {
+    path: String,
+    content: String,
+    notes: String,
+    submitted_by: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PushUpdateRequest {
+    content: Option<String>,
+    review_notes: Option<String>,
+}
+
+fn handle_push_submit(app: &AppHandle, body: &str) -> ApiResponse {
+    let req: PushSubmitRequest = match serde_json::from_str(body) {
+        Ok(req) => req,
+        Err(e) => return err(400, format!("Invalid JSON: {e}")),
+    };
+    if req.path.trim().is_empty() {
+        return err(400, "path is required");
+    }
+    if req.content.trim().is_empty() {
+        return err(400, "content is required");
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let item = PushItem {
+        id: id.clone(),
+        path: req.path,
+        content: req.content,
+        notes: req.notes,
+        submitted_by: req.submitted_by,
+        status: "pending".to_string(),
+        review_notes: String::new(),
+    };
+    let _ = app.emit("push-review:submit", item.clone());
+    ok(json!({
+        "ok": true,
+        "id": id,
+        "path": item.path,
+        "content": item.content,
+        "notes": item.notes,
+        "submittedBy": item.submitted_by,
+        "status": item.status,
+    }))
+}
+
+fn handle_push_queue(app: &AppHandle) -> ApiResponse {
+    let _ = app;
+    let _ = app.emit("push-review:get-queue", ());
+    ok(json!({
+        "ok": true,
+        "items": Vec::<PushItem>::new(),
+        "note": "Queue state is managed by the frontend. This endpoint emits an event for the frontend to respond with current state.",
+    }))
+}
+
+fn handle_push_approve(app: &AppHandle, id: &str, body: &str) -> ApiResponse {
+    let req: PushSubmitRequest = match serde_json::from_str(body) {
+        Ok(req) => req,
+        Err(_) => PushSubmitRequest {
+            path: String::new(),
+            content: String::new(),
+            notes: String::new(),
+            submitted_by: String::new(),
+        },
+    };
+    let _ = app.emit("push-review:approve", serde_json::json!({
+        "id": id,
+        "path": req.path,
+        "content": req.content,
+    }));
+    ok(json!({
+        "ok": true,
+        "id": id,
+        "status": "approved",
+        "note": "Approval event emitted. Frontend will handle file write and ingest.",
+    }))
+}
+
+fn handle_push_reject(app: &AppHandle, id: &str, _body: &str) -> ApiResponse {
+    let _ = app.emit("push-review:reject", serde_json::json!({ "id": id }));
+    ok(json!({
+        "ok": true,
+        "id": id,
+        "status": "rejected",
+    }))
+}
+
+fn handle_push_update(app: &AppHandle, id: &str, body: &str) -> ApiResponse {
+    let req: PushUpdateRequest = match serde_json::from_str(body) {
+        Ok(req) => req,
+        Err(e) => return err(400, format!("Invalid JSON: {e}")),
+    };
+    let _ = app.emit("push-review:update", serde_json::json!({
+        "id": id,
+        "content": req.content,
+        "reviewNotes": req.review_notes,
+    }));
+    ok(json!({
+        "ok": true,
+        "id": id,
+        "note": "Update event emitted. Frontend will handle the actual store update.",
+    }))
 }
 
 fn load_source_watch_config(
