@@ -131,3 +131,15 @@ export async function apiServerReloadConfig(): Promise<string> {
 export async function mcpServerEntryPath(): Promise<string> {
   return invoke<string>("mcp_server_entry_path")
 }
+
+export async function writePushSource(
+  projectPath: string,
+  relativePath: string,
+  content: string,
+): Promise<string> {
+  return invoke<string>("write_push_source", {
+    project_path: projectPath,
+    relative_path: relativePath,
+    content,
+  })
+}

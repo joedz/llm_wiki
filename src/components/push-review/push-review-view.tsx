@@ -2,13 +2,13 @@ import { useCallback, useState } from "react"
 import { CheckCircle2 } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { usePushReviewStore, type PushQueueItem } from "@/stores/push-review-store"
+import { approveAndIngest } from "@/lib/push-review"
 import { PushReviewCard } from "./push-review-card"
 import { PushReviewModal } from "./push-review-modal"
 
 export function PushReviewView() {
   const { t } = useTranslation()
   const items = usePushReviewStore((s) => s.items)
-  const approveItem = usePushReviewStore((s) => s.approveItem)
   const rejectItem = usePushReviewStore((s) => s.rejectItem)
   const updateItem = usePushReviewStore((s) => s.updateItem)
 
@@ -17,9 +17,12 @@ export function PushReviewView() {
 
   const pending = items.filter((i) => i.status === "pending")
 
-  const handleApprove = useCallback((id: string) => {
-    approveItem(id)
-  }, [approveItem])
+  const handleApprove = useCallback(async (id: string) => {
+    const item = items.find((i) => i.id === id)
+    if (item) {
+      await approveAndIngest(item)
+    }
+  }, [items])
 
   const handleReject = useCallback((id: string) => {
     rejectItem(id)
