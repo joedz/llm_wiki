@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach } from "vitest"
-import { usePushReviewStore, resetStore, addItem, approveItem, rejectItem, updateItem } from "./push-review-store"
+import { usePushReviewStore } from "./push-review-store"
 
 describe("push-review-store", () => {
   beforeEach(() => {
-    resetStore()
+    usePushReviewStore.getState().resetStore()
   })
 
   it("starts with empty queue", () => {
@@ -11,7 +11,7 @@ describe("push-review-store", () => {
   })
 
   it("adds an item", () => {
-    const { id } = addItem({
+    const { id } = usePushReviewStore.getState().addItem({
       path: "my-docs/test.md",
       content: "# Test",
       contentType: "text",
@@ -23,13 +23,13 @@ describe("push-review-store", () => {
   })
 
   it("approves an item", () => {
-    const { id } = addItem({
+    const { id } = usePushReviewStore.getState().addItem({
       path: "test.md",
       content: "# Test",
       contentType: "text",
       submittedBy: "MCP",
     })
-    approveItem(id, "reviewer-1")
+    usePushReviewStore.getState().approveItem(id, "reviewer-1")
     const item = usePushReviewStore.getState().items.find((i) => i.id === id)
     expect(item?.status).toBe("approved")
     expect(item?.reviewedBy).toBe("reviewer-1")
@@ -37,13 +37,13 @@ describe("push-review-store", () => {
   })
 
   it("rejects an item", () => {
-    const { id } = addItem({
+    const { id } = usePushReviewStore.getState().addItem({
       path: "test.md",
       content: "# Test",
       contentType: "text",
       submittedBy: "MCP",
     })
-    rejectItem(id, "reviewer-1")
+    usePushReviewStore.getState().rejectItem(id, "reviewer-1")
     const item = usePushReviewStore.getState().items.find((i) => i.id === id)
     expect(item?.status).toBe("rejected")
     expect(item?.reviewedBy).toBe("reviewer-1")
@@ -51,13 +51,13 @@ describe("push-review-store", () => {
   })
 
   it("updates review notes", () => {
-    const { id } = addItem({
+    const { id } = usePushReviewStore.getState().addItem({
       path: "test.md",
       content: "# Test",
       contentType: "text",
       submittedBy: "MCP",
     })
-    updateItem(id, { reviewNotes: "Looks good" })
+    usePushReviewStore.getState().updateItem(id, { reviewNotes: "Looks good" })
     const item = usePushReviewStore.getState().items.find((i) => i.id === id)
     expect(item?.reviewNotes).toBe("Looks good")
   })

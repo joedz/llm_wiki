@@ -20,7 +20,7 @@ interface PushReviewState {
   addItem: (item: Omit<PushQueueItem, "id" | "status" | "submittedAt">) => { id: string }
   approveItem: (id: string, reviewedBy?: string) => void
   rejectItem: (id: string, reviewedBy?: string) => void
-  updateItem: (id: string, patch: Partial<Pick<PushQueueItem, "content" | "reviewNotes">>) => void
+  updateItem: (id: string, patch: Partial<Pick<PushQueueItem, "reviewNotes">>) => void
   resetStore: () => void
   setItems: (items: PushQueueItem[]) => void
 }
@@ -79,14 +79,3 @@ export const usePushReviewStore = create<PushReviewState>((set) => ({
   setItems: (items) => set({ items }),
 }))
 
-export const resetStore = () => usePushReviewStore.getState().resetStore()
-export const addItem = (item: Omit<PushQueueItem, "id" | "status" | "submittedAt">) =>
-  usePushReviewStore.getState().addItem(item)
-export const approveItem = (id: string, reviewedBy?: string) =>
-  usePushReviewStore.getState().approveItem(id, reviewedBy)
-export const rejectItem = (id: string, reviewedBy?: string) =>
-  usePushReviewStore.getState().rejectItem(id, reviewedBy)
-export const updateItem = (
-  id: string,
-  patch: Partial<Pick<PushQueueItem, "content" | "reviewNotes">>
-) => usePushReviewStore.getState().updateItem(id, patch)
