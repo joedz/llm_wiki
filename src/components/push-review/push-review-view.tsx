@@ -19,8 +19,12 @@ export function PushReviewView() {
 
   const handleApprove = useCallback(async (id: string) => {
     const item = items.find((i) => i.id === id)
-    if (item) {
+    if (!item) return
+    try {
       await approveAndIngest(item)
+    } catch (err) {
+      console.error('[PushReview] approve failed:', err)
+      window.alert(`Failed to approve: ${err instanceof Error ? err.message : String(err)}`)
     }
   }, [items])
 

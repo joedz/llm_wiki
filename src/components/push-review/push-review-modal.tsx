@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { useTranslation } from "react-i18next"
 import {
   Dialog,
@@ -20,6 +20,10 @@ interface PushReviewModalProps {
 export function PushReviewModal({ item, onSave, onCancel, isOpen }: PushReviewModalProps) {
   const { t } = useTranslation()
   const [reviewNotes, setReviewNotes] = useState(item?.reviewNotes ?? "")
+
+  useEffect(() => {
+    setReviewNotes(item?.reviewNotes ?? "")
+  }, [item?.reviewNotes])
 
   if (item) {
     return (
