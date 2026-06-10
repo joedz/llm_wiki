@@ -244,6 +244,7 @@ pub fn run() {
             commands::file_sync::get_file_change_queue,
             commands::file_sync::retry_file_change_task,
             commands::file_sync::ignore_file_change_task,
+            commands::push_review::write_push_source,
             set_proxy_env,
             set_close_behavior,
         ])
