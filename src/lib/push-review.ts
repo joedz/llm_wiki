@@ -8,7 +8,7 @@ function queueFilePath(projectPath: string): string {
   return `${normalizePath(projectPath)}/.llm-wiki/push-queue.json`
 }
 
-async function saveQueue(
+export async function saveQueue(
   projectPath: string,
   items: PushQueueItem[],
 ): Promise<void> {
@@ -22,7 +22,7 @@ async function saveQueue(
   }
 }
 
-async function loadQueue(
+export async function loadQueue(
   projectPath: string,
   _projectId: string,
 ): Promise<PushQueueItem[]> {
@@ -35,7 +35,32 @@ async function loadQueue(
   }
 }
 
-function generateId(): string {
+let currentProjectPath = ""
+
+export function initPushReviewPersistence(): void {
+  useWikiStore.subscribe((state) => {
+    currentProjectPath = state.project?.path ?? ""
+  })
+
+  usePushReviewStore.subscribe((state) => {
+    if (currentProjectPath) {
+      saveQueue(currentProjectPath, state.items)
+    }
+  })
+}
+
+export async function restorePushReviewQueue(
+  projectId: string,
+  projectPath: string,
+): Promise<void> {
+  const pp = normalizePath(projectPath)
+  const items = await loadQueue(pp, projectId)
+  if (items.length > 0) {
+    usePushReviewStore.getState().setItems(items)
+  }
+}
+
+export function generateId(): string {
   return `push-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
 
@@ -65,4 +90,3 @@ export async function approveAndIngest(item: PushQueueItem): Promise<void> {
   usePushReviewStore.getState().approveItem(item.id)
 }
 
-export { loadQueue, saveQueue, generateId }
