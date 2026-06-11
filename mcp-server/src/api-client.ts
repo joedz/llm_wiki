@@ -207,8 +207,11 @@ async rescan(projectId = "current"): Promise<Record<string, unknown>> {
     }
   }
 
-  async approvePush(id: string): Promise<Record<string, unknown>> {
-    return this.request(`/push/${encodeURIComponent(id)}/approve`, { method: "POST" })
+  async approvePush(id: string, projectId = "current"): Promise<Record<string, unknown>> {
+    return this.request(`/push/${encodeURIComponent(id)}/approve`, {
+      method: "POST",
+      body: { projectId },
+    })
   }
 
   async rejectPush(id: string): Promise<Record<string, unknown>> {

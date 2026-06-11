@@ -138,8 +138,8 @@ export async function writePushSource(
   content: string,
 ): Promise<string> {
   return invoke<string>("write_push_source", {
-    project_path: projectPath,
-    relative_path: relativePath,
+    projectPath: projectPath,
+    relativePath: relativePath,
     content,
   })
 }

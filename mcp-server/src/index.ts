@@ -158,6 +158,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         type: "object",
         properties: {
           id: { type: "string", description: "The push item ID" },
+          project_id: { type: "string", description: "Project UUID, project path, or 'current'. Defaults to current." },
         },
         required: ["id"],
         additionalProperties: false,
@@ -267,7 +268,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "approve_push": {
         await assertMcpEnabled()
         const id = stringArg(args.id, "id")
-        return textResult(JSON.stringify(await client.approvePush(id), null, 2))
+        const pid = projectId(args)
+        return textResult(JSON.stringify(await client.approvePush(id, pid), null, 2))
       }
       case "reject_push": {
         await assertMcpEnabled()
