@@ -196,7 +196,10 @@
     "addNotesPlaceholder": "请输入备注...",
     "reviewNotesPlaceholder": "请输入审阅备注...",
     "save": "保存",
-    "cancel": "取消"
+    "cancel": "取消",
+    "close": "关闭",
+    "view": "阅览",
+    "remove": "删除记录"
   },
   "settings": {
     "title": "设置",

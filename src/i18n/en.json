@@ -196,7 +196,10 @@
     "addNotesPlaceholder": "Enter your notes...",
     "reviewNotesPlaceholder": "Enter review notes...",
     "save": "Save",
-    "cancel": "Cancel"
+    "cancel": "Cancel",
+    "close": "Close",
+    "view": "View",
+    "remove": "Remove Record"
   },
   "settings": {
     "title": "Settings",
