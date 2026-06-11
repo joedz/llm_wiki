@@ -4,8 +4,19 @@ import { enqueueSourceIngest } from "@/lib/source-lifecycle"
 import { useWikiStore } from "@/stores/wiki-store"
 import { usePushReviewStore, type PushQueueItem } from "@/stores/push-review-store"
 
+interface RemoveLogEntry {
+  id: string
+  path: string
+  removedAt: number
+  removedBy?: string
+}
+
 function queueFilePath(projectPath: string): string {
   return `${normalizePath(projectPath)}/.llm-wiki/push-queue.json`
+}
+
+function removeLogPath(projectPath: string): string {
+  return `${normalizePath(projectPath)}/.llm-wiki/push-review-log.json`
 }
 
 export async function saveQueue(
@@ -88,5 +99,23 @@ export async function approveAndIngest(item: PushQueueItem): Promise<void> {
   await enqueueSourceIngest(project, [relativePath], llmConfig)
 
   usePushReviewStore.getState().approveItem(item.id)
+}
+
+export async function appendRemoveLog(
+  projectPath: string,
+  entry: RemoveLogEntry,
+): Promise<void> {
+  try {
+    const logFile = removeLogPath(projectPath)
+    let existing: { version: number; entries: RemoveLogEntry[] } = { version: 1, entries: [] }
+    if (await fileExists(logFile)) {
+      const raw = await readFile(logFile)
+      existing = JSON.parse(raw) as typeof existing
+    }
+    existing.entries.push(entry)
+    await writeFile(logFile, JSON.stringify(existing, null, 2))
+  } catch {
+    console.error("Failed to write remove log", entry)
+  }
 }
 

@@ -15,9 +15,10 @@ interface PushReviewModalProps {
   onSave: (id: string, reviewNotes: string) => void
   onCancel: () => void
   isOpen: boolean
+  readOnly?: boolean
 }
 
-export function PushReviewModal({ item, onSave, onCancel, isOpen }: PushReviewModalProps) {
+export function PushReviewModal({ item, onSave, onCancel, isOpen, readOnly }: PushReviewModalProps) {
   const { t } = useTranslation()
   const [reviewNotes, setReviewNotes] = useState(item?.reviewNotes ?? "")
 
@@ -62,17 +63,19 @@ export function PushReviewModal({ item, onSave, onCancel, isOpen }: PushReviewMo
 
           <DialogFooter>
             <Button variant="outline" onClick={onCancel}>
-              {t("pushReview.cancel")}
+              {t("pushReview.close")}
             </Button>
-            <Button
-              onClick={() => {
-                if (item) {
-                  onSave(item.id, reviewNotes)
-                }
-              }}
-            >
-              {t("pushReview.save")}
-            </Button>
+            {!readOnly && (
+              <Button
+                onClick={() => {
+                  if (item) {
+                    onSave(item.id, reviewNotes)
+                  }
+                }}
+              >
+                {t("pushReview.save")}
+              </Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>

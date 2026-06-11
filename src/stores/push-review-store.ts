@@ -23,6 +23,7 @@ interface PushReviewState {
   updateItem: (id: string, patch: Partial<Pick<PushQueueItem, "reviewNotes">>) => void
   resetStore: () => void
   setItems: (items: PushQueueItem[]) => void
+  removeItem: (id: string) => void
 }
 
 let counter = 0
@@ -77,5 +78,10 @@ export const usePushReviewStore = create<PushReviewState>((set) => ({
   resetStore: () => set({ items: [] }),
 
   setItems: (items) => set({ items }),
+
+  removeItem: (id) =>
+    set((state) => ({
+      items: state.items.filter((item) => item.id !== id),
+    })),
 }))
 

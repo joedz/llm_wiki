@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react"
 import { CheckCircle2 } from "lucide-react"
 import { useTranslation } from "react-i18next"
+import { emit } from "@tauri-apps/api/event"
 import { usePushReviewStore, type PushQueueItem } from "@/stores/push-review-store"
 import { approveAndIngest } from "@/lib/push-review"
 import { PushReviewCard } from "./push-review-card"
@@ -44,6 +45,18 @@ export function PushReviewView() {
     updateItem(id, { reviewNotes: notes })
   }, [updateItem])
 
+  const handleRemove = useCallback((id: string) => {
+    emit("push-review:remove", { id })
+  }, [])
+
+  const handleView = useCallback((id: string) => {
+    const item = items.find((i) => i.id === id)
+    if (item) {
+      setEditingItem(item)
+      setIsModalOpen(true)
+    }
+  }, [items])
+
   const handleModalSave = useCallback((id: string, reviewNotes: string) => {
     updateItem(id, { reviewNotes })
     setIsModalOpen(false)
@@ -84,6 +97,8 @@ export function PushReviewView() {
                 onReject={handleReject}
                 onEdit={handleEdit}
                 onAddNotes={handleAddNotes}
+                onRemove={handleRemove}
+                onView={handleView}
               />
             ))}
           </div>
@@ -95,6 +110,7 @@ export function PushReviewView() {
         isOpen={isModalOpen}
         onSave={handleModalSave}
         onCancel={handleModalCancel}
+        readOnly={editingItem?.status !== "pending"}
       />
     </div>
   )

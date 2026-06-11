@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { Check, X, Pencil, MessageSquare } from "lucide-react"
+import { Check, X, Pencil, MessageSquare, FileText, Trash2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useTranslation } from "react-i18next"
 import type { PushQueueItem } from "@/stores/push-review-store"
@@ -10,6 +10,8 @@ interface PushReviewCardProps {
   onReject: (id: string) => void
   onEdit: (id: string) => void
   onAddNotes: (id: string, notes: string) => void
+  onRemove: (id: string) => void
+  onView: (id: string) => void
 }
 
 const statusConfig: Record<PushQueueItem["status"], { color: string; label: string }> = {
@@ -18,7 +20,7 @@ const statusConfig: Record<PushQueueItem["status"], { color: string; label: stri
   rejected: { color: "text-red-500", label: "Rejected" },
 }
 
-export function PushReviewCard({ item, onApprove, onReject, onEdit, onAddNotes }: PushReviewCardProps) {
+export function PushReviewCard({ item, onApprove, onReject, onEdit, onAddNotes, onRemove, onView }: PushReviewCardProps) {
   const { t } = useTranslation()
   const [notesInput, setNotesInput] = useState("")
   const [showNotesInput, setShowNotesInput] = useState(false)
@@ -127,6 +129,28 @@ export function PushReviewCard({ item, onApprove, onReject, onEdit, onAddNotes }
               {t("pushReview.addNotes")}
             </Button>
           )}
+        </div>
+      )}
+      {item.status !== "pending" && (
+        <div className="flex flex-wrap gap-1.5">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 text-xs gap-1"
+            onClick={() => onView(item.id)}
+          >
+            <FileText className="h-3 w-3" />
+            {t("pushReview.view")}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 text-xs gap-1"
+            onClick={() => onRemove(item.id)}
+          >
+            <Trash2 className="h-3 w-3" />
+            {t("pushReview.remove")}
+          </Button>
         </div>
       )}
     </div>
