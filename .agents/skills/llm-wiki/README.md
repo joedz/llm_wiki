@@ -128,7 +128,7 @@ What's **not** in the threat model:
 
 ## Version
 
-This skill matches **LLM Wiki API v1** as shipped in app version `0.4.10+`. Hybrid retrieval (keyword + vector) is live; the response carries `mode: "keyword" | "vector" | "hybrid"`, `tokenHits`, `vectorHits`, and per-result `vectorScore`. If the desktop app's `/health` reports a major version bump, check `api-reference.md` for drift before relying on the contract verbatim.
+This skill matches **LLM Wiki API v1** as shipped in app version `0.4.20+`. Hybrid retrieval (keyword + vector) is live; the response carries `mode: "keyword" | "vector" | "hybrid"`, `tokenHits`, `vectorHits`, and per-result `vectorScore`. If the desktop app's `/health` reports a major version bump, check `api-reference.md` for drift before relying on the contract verbatim.
 
 ## Updating
 

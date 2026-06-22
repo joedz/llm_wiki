@@ -1,6 +1,6 @@
-# Conversation â†’ API patterns
+# Conversation â†?API patterns
 
-Treat these as **recipes**, not scripts. The agent decides when to combine them. Every example is plain HTTP â€” pick whichever client your environment already has (`curl`, `fetch`, `requests`, etc.).
+Treat these as **recipes**, not scripts. The agent decides when to combine them. Every example is plain HTTP â€?pick whichever client your environment already has (`curl`, `fetch`, `requests`, etc.).
 
 ---
 
@@ -12,16 +12,16 @@ The bash + `curl` + `jq` snippets below are written for **macOS / Linux**. On **
 |---|---|---|
 | `$TOKEN` env var | `$env:LLM_WIKI_API_TOKEN` | `%LLM_WIKI_API_TOKEN%` |
 | URL-encode a string<br>`printf %s "$x" \| jq -sRr @uri` | `[System.Uri]::EscapeDataString($x)` | use a helper / `curl --data-urlencode` |
-| `curl -s -H "Authorization: â€¦"` | `curl.exe -s -H "Authorization: â€¦"` (use `curl.exe` to avoid PowerShell's `curl` â†’ `Invoke-WebRequest` alias) | `curl -s -H "Authorization: â€¦"` |
+| `curl -s -H "Authorization: â€?` | `curl.exe -s -H "Authorization: â€?` (use `curl.exe` to avoid PowerShell's `curl` â†?`Invoke-WebRequest` alias) | `curl -s -H "Authorization: â€?` |
 | Backtick line-continuation `\` at end of line | backtick `` ` `` at end of line | `^` at end of line |
 
 **Paths on Windows**:
 
 - Always pass **forward slashes** in API request paths (`wiki/concepts/foo.md`, never `wiki\concepts\foo.md`). The server stores and accepts the forward-slash form.
 - When using a Windows filesystem path as `{id}` (e.g. `C:/Users/me/wiki`), percent-encode the **colon** (`C%3A/Users/me/wiki`). `EscapeDataString` / `encodeURIComponent` / `jq @uri` all do this correctly.
-- If a path-as-id call returns 404 on Windows, fall back to `GET /api/v1/projects` and use the project's UUID â€” UUIDs are platform-agnostic and don't need encoding.
+- If a path-as-id call returns 404 on Windows, fall back to `GET /api/v1/projects` and use the project's UUID â€?UUIDs are platform-agnostic and don't need encoding.
 
-If you're calling from JavaScript / Python / Go / any other language with a real HTTP client (`fetch`, `requests`, `httpx`, `net/http`), platform doesn't matter â€” just `encodeURIComponent` or its equivalent and forget the shell quirks.
+If you're calling from JavaScript / Python / Go / any other language with a real HTTP client (`fetch`, `requests`, `httpx`, `net/http`), platform doesn't matter â€?just `encodeURIComponent` or its equivalent and forget the shell quirks.
 
 ---
 
@@ -48,14 +48,14 @@ The score's scale depends on `mode`:
 
 | `mode` | Typical top `score` | What "good" looks like |
 |---|---|---|
-| `keyword` | 50â€“300+ (additive: filename-exact â‰ˆ 200, phrase-in-title â‰ˆ 50) | A clear gap (2Ã—+) between top result and the rest. |
-| `hybrid` / `vector` | 0.015â€“0.035 (RRF: `1/(60+rank)`-based) | Top RRF score near `0.032` â‰ˆ matched in both keyword and vector top-1. |
+| `keyword` | 50â€?00+ (additive: filename-exact â‰?200, phrase-in-title â‰?50) | A clear gap (2Ã—+) between top result and the rest. |
+| `hybrid` / `vector` | 0.015â€?.035 (RRF: `1/(60+rank)`-based) | Top RRF score near `0.032` â‰?matched in both keyword and vector top-1. |
 
-**Don't apply a fixed threshold across modes.** Sort by `score` descending and rely on the relative gap. Use `vectorScore` (when present) for "how strong was the semantic match" â€” it's a raw similarity in `[0, 1]`, much easier to threshold than RRF.
+**Don't apply a fixed threshold across modes.** Sort by `score` descending and rely on the relative gap. Use `vectorScore` (when present) for "how strong was the semantic match" â€?it's a raw similarity in `[0, 1]`, much easier to threshold than RRF.
 
 Answer template:
 
-> Per `wiki/concepts/rope.md` (matched via hybrid, vectorScore=0.94), rotary position embedding works by rotating Q and K vectors by an angle proportional to position. Your wiki specifically mentions â€¦
+> Per `wiki/concepts/rope.md` (matched via hybrid, vectorScore=0.94), rotary position embedding works by rotating Q and K vectors by an angle proportional to position. Your wiki specifically mentions â€?
 
 ---
 
@@ -89,7 +89,7 @@ const { content } = await r.json()
 
 ## "What pages link to X?" / "Show me the neighborhood of X"
 
-1. `GET /api/v1/projects/current/graph?limit=1000` â€” pull the whole graph once (cheap, < 1 MB for typical projects).
+1. `GET /api/v1/projects/current/graph?limit=1000` â€?pull the whole graph once (cheap, < 1 MB for typical projects).
 2. Find `nodes[i].id === X` (or label substring match).
 3. Filter `edges` for `source === X || target === X`. The other endpoint is a neighbor.
 
@@ -120,16 +120,16 @@ graph LR
 
 Two angles:
 
-**Structural overview** â€” file tree:
+**Structural overview** â€?file tree:
 
 ```bash
 curl -s -H "Authorization: Bearer $TOKEN" \
   "$BASE/api/v1/projects/current/files?root=wiki&recursive=true&maxFiles=500"
 ```
 
-Summarize the directory structure (`concepts/`, `entities/`, `sources/`â€¦) and rough page counts per category.
+Summarize the directory structure (`concepts/`, `entities/`, `sources/`â€? and rough page counts per category.
 
-**Topical overview** â€” read the curated index:
+**Topical overview** â€?read the curated index:
 
 ```bash
 for path in wiki/index.md wiki/overview.md purpose.md; do
@@ -144,13 +144,13 @@ The user's `purpose.md` describes intent; `index.md` enumerates pages; `overview
 
 ---
 
-## "I added new docs to the source folder â€” re-index"
+## "I added new docs to the source folder â€?re-index"
 
 1. `POST /api/v1/projects/current/sources/rescan`
 2. Read back `changedTasks`. Report:
    - "Detected N new / M modified / K deleted files."
    - List the first ~5 file paths so the user can verify.
-3. Tell the user the **actual ingest** runs asynchronously via the desktop queue â€” encourage them to open the Activity panel if they want progress.
+3. Tell the user the **actual ingest** runs asynchronously via the desktop queue â€?encourage them to open the Activity panel if they want progress.
 
 ```bash
 curl -s -X POST -H "Authorization: Bearer $TOKEN" \
@@ -159,7 +159,7 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" \
 
 If `changedTasks` is empty:
 
-> No file changes detected. If you added files but they're not appearing, check `Settings â†’ Source Watch` â€” your filters may be excluding them (e.g., `.json` is excluded by default).
+> No file changes detected. If you added files but they're not appearing, check `Settings â†?Source Watch` â€?your filters may be excluding them (e.g., `.json` is excluded by default).
 
 ---
 
@@ -168,9 +168,9 @@ If `changedTasks` is empty:
 Search is ranked (hybrid when embeddings are configured, keyword otherwise) and capped at 50 hits per call. For **exhaustive** sweeps:
 
 1. Run `POST .../search` with `topK: 50` and your term.
-2. If the 50th result still has a non-trivial score (relative to the top), run again with a more specific query â€” the API will not return more than 50 in one call.
+2. If the 50th result still has a non-trivial score (relative to the top), run again with a more specific query â€?the API will not return more than 50 in one call.
 3. For **exact-string** sweeps where keyword tokenization mangles your phrase (e.g. CJK punctuation boundaries, code identifiers with underscores), walk every `wiki/*.md` via `files` + `files/content` and grep client-side. Slow but reliable.
-4. Pure-semantic sweeps: set `topK: 50` and read `vectorScore` on each hit â€” pages without `vectorScore` matched only via keyword.
+4. Pure-semantic sweeps: set `topK: 50` and read `vectorScore` on each hit â€?pages without `vectorScore` matched only via keyword.
 
 ---
 
@@ -188,8 +188,8 @@ When the user names a specific project rather than implying the active one.
    ```json
    {
      "projects": [
-       {"id":"abc-â€¦","name":"Research Notes","path":"/Users/me/wiki/research","current":true},
-       {"id":"def-â€¦","name":"Reading","path":"/Users/me/wiki/reading","current":false}
+       {"id":"abc-â€?,"name":"Research Notes","path":"/Users/me/wiki/research","current":true},
+       {"id":"def-â€?,"name":"Reading","path":"/Users/me/wiki/reading","current":false}
      ]
    }
    ```
@@ -204,14 +204,14 @@ When the user names a specific project rather than implying the active one.
    ```
 
 3. Handle ambiguity:
-   - **0 matches** â†’ tell the user, list available names, ask which one. Don't silently fall back to `current` â€” that would answer the wrong question.
-   - **1 match** â†’ use its `id` in all subsequent calls for this conversation.
-   - **2+ matches** â†’ ask the user to disambiguate, showing both `name` + `path`.
+   - **0 matches** â†?tell the user, list available names, ask which one. Don't silently fall back to `current` â€?that would answer the wrong question.
+   - **1 match** â†?use its `id` in all subsequent calls for this conversation.
+   - **2+ matches** â†?ask the user to disambiguate, showing both `name` + `path`.
 
 4. Use the resolved id directly:
 
    ```bash
-   PROJECT_ID="def-â€¦"   # from step 2
+   PROJECT_ID="def-â€?   # from step 2
    curl -s -H "Authorization: Bearer $TOKEN" \
      -H 'Content-Type: application/json' \
      -d '{"query":"narrative voice","topK":5}' \
@@ -234,7 +234,7 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 
 User wants cross-project synthesis.
 
-1. `GET /api/v1/projects` once â†’ grab both ids.
+1. `GET /api/v1/projects` once â†?grab both ids.
 2. Search each separately with the same query:
 
    ```bash
@@ -246,7 +246,7 @@ User wants cross-project synthesis.
    done
    ```
 
-3. Diff / contrast the result sets. Cite **both** project name and page path: *"In Research Notes (`wiki/concepts/narrative.md`)â€¦ vs. in Reading (`wiki/concepts/voice.md`)â€¦"*.
+3. Diff / contrast the result sets. Cite **both** project name and page path: *"In Research Notes (`wiki/concepts/narrative.md`)â€?vs. in Reading (`wiki/concepts/voice.md`)â€?*.
 
 `current` only refers to the active project; for multi-project queries always pass explicit IDs.
 
@@ -258,21 +258,106 @@ User has been asking about the active project, then says "now check my Reading p
 
 1. Re-resolve via `GET /api/v1/projects` (or use cached list if recent).
 2. Replace your cached project id for the rest of the conversation.
-3. **Confirm the switch in your reply once**: *"Switching to your Reading projectâ€¦"*. Don't silently apply.
-4. Keep the user's query â€” apply it to the new project.
+3. **Confirm the switch in your reply once**: *"Switching to your Reading projectâ€?*. Don't silently apply.
+4. Keep the user's query â€?apply it to the new project.
 
-The desktop UI's active project does **not** change just because you used a different `{id}` â€” your API calls scoped to a non-current id are read-only and don't affect the user's UI state.
+The desktop UI's active project does **not** change just because you used a different `{id}` â€?your API calls scoped to a non-current id are read-only and don't affect the user's UI state.
 
 ---
 
 ## Anti-patterns
 
-- **Don't `POST /chat`** â€” it returns 501. Use the desktop chat UI, or call your own LLM with the wiki content as context.
-- **Don't paginate the file tree with maxFiles=1, maxFiles=2, â€¦** â€” there's no offset/cursor. Use a higher cap or filter by `root=`.
-- **Don't bypass the API for writes.** The API is read-mostly. Writing to `wiki/**` or `raw/sources/**` via the filesystem directly bypasses the file-sync watcher. Use the desktop UI's Sources â†’ Import flow or the ingest pipeline.
+- **Don't paginate the file tree with maxFiles=1, maxFiles=2, â€?* â€?there's no offset/cursor. Use a higher cap or filter by `root=`.
+- **Don't bypass the API for writes.** Writing to `wiki/**` or `raw/sources/**` via the filesystem directly bypasses the file-sync watcher. Use the desktop UI's Sources â†?Import flow or the ingest pipeline. For chat-generated content, use the push endpoint to submit for review.
 - **Don't include the token in URLs you echo / log / show.** Use headers in any output visible to the user.
-- **Don't retry blindly on 429 / 503** â€” back off explicitly (1s / 2s respectively).
+- **Don't retry blindly on 429 / 503** â€?back off explicitly (1s / 2s respectively).
 - **Don't shell out to a wrapper script.** The API is the contract. Direct `curl` / `fetch` is the interface.
+
+---
+
+## "Chat with my wiki about X"
+
+Use the chat endpoint to ask questions grounded in the wiki knowledge base. The response includes citations.
+
+```bash
+curl -X POST "http://127.0.0.1:19828/api/v1/projects/current/chat" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"message":"what is RoPE and how does it differ from absolute positional encoding","stream":false}'
+```
+
+Response:
+
+```json
+{
+  "ok": true,
+  "response": "# Rotary Position Embedding (RoPE)\n\nRoPE encodes position information by rotating query and key vectors...",
+  "references": [
+    {
+      "kind": "wiki",
+      "path": "wiki/concepts/rope.md",
+      "snippet": "--- type: concept title: RoPE ... ---",
+      "title": "RoPE"
+    }
+  ],
+  "warnings": []
+}
+```
+
+For streaming responses (SSE), set `stream: true` and use `Accept: text/event-stream` header. The endpoint emits `start`, `context`, `reasoning`, `token`, and `done` events.
+
+You can also enable web search or AnyTXT local search for a specific query:
+
+```json
+{"message": "latest research on X", "useWebSearch": true, "useAnyTxtSearch": false}
+```
+
+---
+
+## "Submit this content to my wiki for review"
+
+Use the push endpoint to submit generated content for human review before it enters the wiki.
+
+```bash
+curl -X POST "http://127.0.0.1:19828/api/v1/push" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "path": "wiki/concepts/new-topic.md",
+    "content": "# New Topic\n\nContent generated from chat...",
+    "notes": "Created from research on X",
+    "submittedBy": "agent"
+  }'
+```
+
+Response:
+
+```json
+{
+  "ok": true,
+  "id": "uuid-of-push-item",
+  "path": "wiki/concepts/new-topic.md",
+  "status": "pending"
+}
+```
+
+To check pending items:
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" "$BASE/api/v1/push/queue"
+```
+
+To approve or reject:
+
+```bash
+# Approve (triggers file write + ingest)
+curl -X POST "$BASE/api/v1/push/uuid-of-item/approve" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Reject (discarded)
+curl -X POST "$BASE/api/v1/push/uuid-of-item/reject" \
+  -H "Authorization: Bearer $TOKEN"
+```
 
 ---
 
@@ -285,7 +370,7 @@ Agent (internally):
 ```bash
 # 1. health + auth pre-flight
 curl -s "$BASE/api/v1/health"
-# â†’ tokenSource=store, enabled=true, authConfigured=true âœ“
+# â†?tokenSource=store, enabled=true, authConfigured=true âœ?
 
 # 2. search
 curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
@@ -299,7 +384,7 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 
 Agent (to user):
 
-> Looking in your active project. Search ran in **hybrid mode** (tokenHits=12, vectorHits=8) â€” top hit `wiki/concepts/flash-attention.md` matched both keyword and vector signals (`vectorScore=0.91`).
+> Looking in your active project. Search ran in **hybrid mode** (tokenHits=12, vectorHits=8) â€?top hit `wiki/concepts/flash-attention.md` matched both keyword and vector signals (`vectorScore=0.91`).
 >
 > Your wiki explains FlashAttention as a memory-efficient exact attention implementation that tiles the QKV matrices to avoid materializing the full NÃ—N attention map. Key claim: **2-4Ã— speedup at long context on A100s** (per your wiki).
 >

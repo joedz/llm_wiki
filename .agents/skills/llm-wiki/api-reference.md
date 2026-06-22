@@ -1,4 +1,4 @@
-# LLM Wiki API v1 ‚Äî Endpoint reference
+# LLM Wiki API v1 ‚Ä?Endpoint reference
 
 Base URL: `http://127.0.0.1:19828`
 Prefix:   `/api/v1`
@@ -22,7 +22,7 @@ X-LLM-Wiki-Token: <token>
 {
   "ok": true,
   "status": "running",
-  "version": "0.4.x",
+  "version": "0.4.20",
   "enabled": true,
   "authRequired": true,
   "authConfigured": true,
@@ -33,12 +33,12 @@ X-LLM-Wiki-Token: <token>
 
 Field reference:
 
-- `status` ‚Äî `starting` / `running` / `port_conflict` / `error`
-- `enabled` ‚Äî `false` = user toggled the API off; all non-`/health` endpoints return 503
-- `authRequired` ‚Äî `false` iff `allowUnauthenticated: true`
-- `authConfigured` ‚Äî `true` if env `LLM_WIKI_API_TOKEN` or `apiConfig.token` is set
-- `allowUnauthenticated` ‚Äî anonymous local-process mode (rare; user opt-in only)
-- `tokenSource` ‚Äî `env` / `store` / `none`. If `env`, the desktop UI token field is **ignored**.
+- `status` ‚Ä?`starting` / `running` / `port_conflict` / `error`
+- `enabled` ‚Ä?`false` = user toggled the API off; all non-`/health` endpoints return 503
+- `authRequired` ‚Ä?`false` iff `allowUnauthenticated: true`
+- `authConfigured` ‚Ä?`true` if env `LLM_WIKI_API_TOKEN` or `apiConfig.token` is set
+- `allowUnauthenticated` ‚Ä?anonymous local-process mode (rare; user opt-in only)
+- `tokenSource` ‚Ä?`env` / `store` / `none`. If `env`, the desktop UI token field is **ignored**.
 
 ---
 
@@ -76,11 +76,11 @@ The `current` flag marks the project that is currently open in the desktop UI. U
 
 ### Resolving a user-spoken project name
 
-There is **no `?name=` filter** on this endpoint and `{id}` does **not** accept a name directly ‚Äî names are resolved entirely client-side after listing all projects.
+There is **no `?name=` filter** on this endpoint and `{id}` does **not** accept a name directly ‚Ä?names are resolved entirely client-side after listing all projects.
 
 Algorithm:
 
-1. `GET /api/v1/projects` ‚Üí array of `{id, name, path, current}`
+1. `GET /api/v1/projects` ‚Ü?array of `{id, name, path, current}`
 2. Case-insensitive substring match on `name`:
    ```js
    const matches = projects.filter(p =>
@@ -88,12 +88,12 @@ Algorithm:
    )
    ```
 3. Handle the cardinality:
-   - **0 matches** ‚Üí tell the user, list available names, ask. Don't silently fall back to `current`.
-   - **1 match** ‚Üí use `matches[0].id` for all subsequent calls in this conversation.
-   - **2+ matches** ‚Üí ask the user to disambiguate (show `name` + `path` for each).
+   - **0 matches** ‚Ü?tell the user, list available names, ask. Don't silently fall back to `current`.
+   - **1 match** ‚Ü?use `matches[0].id` for all subsequent calls in this conversation.
+   - **2+ matches** ‚Ü?ask the user to disambiguate (show `name` + `path` for each).
 4. Cache the resolved `id` for the rest of the conversation. Only re-list when the user switches contexts.
 
-If the user gives a filesystem path verbatim, you can URL-encode it and pass it as `{id}` directly ‚Äî no list lookup needed:
+If the user gives a filesystem path verbatim, you can URL-encode it and pass it as `{id}` directly ‚Ä?no list lookup needed:
 
 ```bash
 # macOS / Linux (bash / zsh)
@@ -109,14 +109,14 @@ curl.exe -s -H "Authorization: Bearer $env:LLM_WIKI_API_TOKEN" `
   "$env:BASE/api/v1/projects/$projectPath/files?root=wiki"
 ```
 
-**Windows path gotchas** ‚Äî match the form the desktop app stored, otherwise you'll get 404:
+**Windows path gotchas** ‚Ä?match the form the desktop app stored, otherwise you'll get 404:
 
 - Use **forward slashes** (`C:/Users/me/wiki`), not backslashes. The desktop app normalizes paths to forward slashes before saving.
-- Preserve the case the user actually has on disk (`C:/Users/Me/...` ‚â† `c:/users/me/...` for the API's string compare, even though Windows itself is case-insensitive).
-- The colon after the drive letter **must** be percent-encoded (`%3A`) ‚Äî it's a reserved URI delimiter. `EscapeDataString` / `jq @uri` / `encodeURIComponent` all do this for you.
-- If you get 404, fall back to `GET /api/v1/projects`, find the project there, and use its `id` (UUID) ‚Äî UUIDs are platform-agnostic and never need encoding.
+- Preserve the case the user actually has on disk (`C:/Users/Me/...` ‚â?`c:/users/me/...` for the API's string compare, even though Windows itself is case-insensitive).
+- The colon after the drive letter **must** be percent-encoded (`%3A`) ‚Ä?it's a reserved URI delimiter. `EscapeDataString` / `jq @uri` / `encodeURIComponent` all do this for you.
+- If you get 404, fall back to `GET /api/v1/projects`, find the project there, and use its `id` (UUID) ‚Ä?UUIDs are platform-agnostic and never need encoding.
 
-If the path isn't registered in the desktop app, you'll get **404** ‚Äî fall back to listing and asking.
+If the path isn't registered in the desktop app, you'll get **404** ‚Ä?fall back to listing and asking.
 
 ---
 
@@ -129,8 +129,8 @@ Query params:
 | Param | Default | Notes |
 |---|---|---|
 | `root` | `wiki` | One of `wiki` / `sources` (alias `raw`, `raw/sources`) / `all`. `all` lists every public sub-tree (`purpose.md`, `schema.md`, `wiki/`, `raw/sources/`). |
-| `recursive` | `true` | `false` ‚Üí only one level. |
-| `maxFiles` | `2000` | Clamped to `[1, 10000]`. Exceed ‚Üí 413. |
+| `recursive` | `true` | `false` ‚Ü?only one level. |
+| `maxFiles` | `2000` | Clamped to `[1, 10000]`. Exceed ‚Ü?413. |
 
 Response:
 
@@ -187,10 +187,10 @@ Response:
 
 Failure modes:
 
-- `403` ‚Äî path outside the allow-list (e.g., `../app-state.json`, `.llm-wiki/foo.json`)
-- `404` ‚Äî file does not exist
-- `413` ‚Äî file > 2 MB
-- `415` ‚Äî file is binary / non-UTF-8 (e.g., PNG, PDF). Use the desktop UI to view; the API is text-only.
+- `403` ‚Ä?path outside the allow-list (e.g., `../app-state.json`, `.llm-wiki/foo.json`)
+- `404` ‚Ä?file does not exist
+- `413` ‚Ä?file > 2 MB
+- `415` ‚Ä?file is binary / non-UTF-8 (e.g., PNG, PDF). Use the desktop UI to view; the API is text-only.
 
 ---
 
@@ -211,10 +211,10 @@ Body:
 
 | Field | Default | Notes |
 |---|---|---|
-| `query` | (required) | Non-empty. Empty / whitespace-only ‚Üí 400. |
+| `query` | (required) | Non-empty. Empty / whitespace-only ‚Ü?400. |
 | `topK` | `10` | Clamped to `[1, 50]`. |
 | `includeContent` | `false` | When `true`, each hit carries `content` (full markdown). Skip the per-page content fetch round-trip. |
-| `queryEmbedding` | `null` | Optional `number[]`. If you precomputed a query embedding (your own model, batched offline), pass it here and the server skips its own embed call. Must be a non-empty array of finite numbers, otherwise ‚Üí 400. |
+| `queryEmbedding` | `null` | Optional `number[]`. If you precomputed a query embedding (your own model, batched offline), pass it here and the server skips its own embed call. Must be a non-empty array of finite numbers, otherwise ‚Ü?400. |
 
 Response:
 
@@ -245,13 +245,13 @@ Response:
 
 ### Retrieval mode
 
-The server picks the mode automatically based on whether the active project has embeddings configured (Settings ‚Üí Embeddings) **and** whether the vector index for the project has data:
+The server picks the mode automatically based on whether the active project has embeddings configured (Settings ‚Ü?Embeddings) **and** whether the vector index for the project has data:
 
 | `mode` | Trigger | Score scale |
 |---|---|---|
 | `"keyword"` | No `embeddingConfig`, OR embedding fetch failed, OR vector index empty. | Additive keyword score: filename-exact ~200, phrase-in-title ~50+, token-bag scoring in single digits. |
-| `"vector"` | Vector index returned hits but keyword scoring matched nothing. Rare in practice. | RRF rank score, typically `1 / (60 + rank)` ‚âà `0.015‚Äì0.017`. |
-| `"hybrid"` | Both keyword and vector pipelines produced hits ‚Äî the common case when embeddings are enabled. | RRF combined: up to `1/61 + 1/61` ‚âà `0.0328` for a top hit. |
+| `"vector"` | Vector index returned hits but keyword scoring matched nothing. Rare in practice. | RRF rank score, typically `1 / (60 + rank)` ‚â?`0.015‚Ä?.017`. |
+| `"hybrid"` | Both keyword and vector pipelines produced hits ‚Ä?the common case when embeddings are enabled. | RRF combined: up to `1/61 + 1/61` ‚â?`0.0328` for a top hit. |
 
 `tokenHits` is the number of pages the keyword pass scored; `vectorHits` is the number of distinct pages LanceDB returned. Either can be 0.
 
@@ -260,11 +260,11 @@ The server picks the mode automatically based on whether the active project has 
 | Field | Always present? | Notes |
 |---|---|---|
 | `path` | yes | Project-relative path to the markdown page. |
-| `title` | yes | Front-matter `title:` if present; else first `# Heading`; else filename with dashes ‚Üí spaces. |
+| `title` | yes | Front-matter `title:` if present; else first `# Heading`; else filename with dashes ‚Ü?spaces. |
 | `snippet` | yes | ~160-char window. In keyword mode: centered on the query/anchor token in the page body. In vector-only matches: the actual matching chunk text, optionally prefixed with the chunk's heading path (e.g. `"Section > Detail: chunk text..."`). |
 | `titleMatch` | yes | `true` when a token or phrase hit the title (boosts ranking). |
 | `score` | yes | Final ranking score. See "Retrieval mode" for scale. |
-| `vectorScore` | optional | Raw vector similarity (‚âà cosine 0‚Äì1) when the page matched via the vector index. Useful for "how strong was the semantic match" decisions. Absent on pure keyword hits. |
+| `vectorScore` | optional | Raw vector similarity (‚â?cosine 0‚Ä?) when the page matched via the vector index. Useful for "how strong was the semantic match" decisions. Absent on pure keyword hits. |
 | `images` | yes | Embedded `![alt](url)` references discovered in the markdown, deduped by URL. Useful for the agent to surface diagrams. |
 | `content` | optional | Full markdown, only when `includeContent: true`. |
 
@@ -280,8 +280,8 @@ Query params:
 
 | Param | Default | Notes |
 |---|---|---|
-| `q` | ‚Äî | Substring filter on `id` or `label`, case-insensitive. |
-| `nodeType` | ‚Äî | Filter on frontmatter `type:` (e.g., `entity`, `concept`, `query`, `other`). |
+| `q` | ‚Ä?| Substring filter on `id` or `label`, case-insensitive. |
+| `nodeType` | ‚Ä?| Filter on frontmatter `type:` (e.g., `entity`, `concept`, `query`, `other`). |
 | `limit` | `200` | Clamped to `[1, 1000]`. |
 
 Response:
@@ -309,7 +309,7 @@ Response:
 }
 ```
 
-Edges are derived from `[[wikilink]]` references inside `wiki/*.md`. Deduplicated by unordered pair `(source, target)` ‚Äî `[[a]]` in b and `[[b]]` in a produce **one** edge. Self-edges are dropped. `weight` is `1.0` in v1.
+Edges are derived from `[[wikilink]]` references inside `wiki/*.md`. Deduplicated by unordered pair `(source, target)` ‚Ä?`[[a]]` in b and `[[b]]` in a produce **one** edge. Self-edges are dropped. `weight` is `1.0` in v1.
 
 `linkCount` is the node's degree in the deduped graph.
 
@@ -341,7 +341,7 @@ No body required.
 }
 ```
 
-`changedTasks` contains the files this rescan **actually detected as changed** (created / modified / deleted). The downstream ingest queue picks these up asynchronously ‚Äî the API call returns as soon as the diff is queued, not when ingest finishes.
+`changedTasks` contains the files this rescan **actually detected as changed** (created / modified / deleted). The downstream ingest queue picks these up asynchronously ‚Ä?the API call returns as soon as the diff is queued, not when ingest finishes.
 
 The user's `sourceWatchConfig` (file type filters, exclude dirs, max size) is honored. If the user disabled auto-ingest, files are still detected but not queued for the LLM pipeline.
 
@@ -349,7 +349,209 @@ The user's `sourceWatchConfig` (file type filters, exclude dirs, max size) is ho
 
 ## POST /api/v1/projects/{id}/chat
 
-**Returns 501.** Chat / RAG pipeline lives in the WebView in v1. Don't invoke. Tell the user to use the desktop chat UI.
+Conversational query against the wiki knowledge base. Supports both non-streaming JSON responses and Server-Sent Events (SSE) for streaming.
+
+**Auth:** required.
+
+### Non-streaming request (stream=false)
+
+```bash
+curl -X POST "http://127.0.0.1:19828/api/v1/projects/current/chat" \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"message":"what does my wiki say about X","stream":false}'
+```
+
+**Request body:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `message` | string | ‚ú?| Question or query (English recommended for best results) |
+| `stream` | boolean | ‚ù?| `false` (default) for JSON response, `true` for SSE |
+| `useWebSearch` | boolean | ‚ù?| Enable web search (Tavily/SerpApi/SearXNG) for this query |
+| `useAnyTxtSearch` | boolean | ‚ù?| Enable AnyTXT local file search for this query |
+
+**Non-streaming response:**
+
+```json
+{
+  "ok": true,
+  "response": "# Answer\n\nThe wiki explains that...",
+  "references": [
+    {
+      "kind": "wiki",
+      "path": "wiki/concepts/x.md",
+      "snippet": "--- type: concept title: X ...intro... ---",
+      "title": "X"
+    }
+  ],
+  "warnings": []
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `response` | string | Markdown-formatted answer from the LLM |
+| `references` | array | Wiki pages used to ground the answer (`kind`, `path`, `snippet`, `title`) |
+| `warnings` | array | Any warnings (usually empty) |
+
+### Streaming request (stream=true)
+
+```bash
+curl -X POST "http://127.0.0.1:19828/api/v1/projects/current/chat" \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"message":"what does my wiki say about X","stream":true}'
+```
+
+**SSE events:**
+
+| Event | Payload | Description |
+|---|---|---|
+| `start` | `{"ok":true,"projectId":"...","mode":"chat"}` | Request started |
+| `context` | `{"references":[...],"warnings":[...]}` | Context pages loaded |
+| `reasoning` | `{"text":"..."}` | Thinking/reasoning content (DeepSeek, QwQ, etc.) |
+| `token` | `{"text":"..."}` | Response token stream |
+| `done` | `{"response":"...","references":[...],"warnings":[]}` | Final response |
+
+**Note:** The `message` field name is `message`, **not** `query`. Using `query` will return a 400 error.
+
+---
+
+## POST /api/v1/push
+
+Submit a document for review before adding to the wiki. The document is held in a pending queue for human approval.
+
+**Auth:** required.
+
+**Request body:**
+
+```json
+{
+  "path": "wiki/concepts/new-concept.md",
+  "content": "# New Concept\n\nContent to review...",
+  "notes": "Optional notes about this submission",
+  "submittedBy": "agent or user identifier"
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `path` | string | ‚ú?| Target path in the wiki (must be non-empty) |
+| `content` | string | ‚ú?| Document content (must be non-empty) |
+| `notes` | string | ‚ù?| Optional notes about this submission |
+| `submittedBy` | string | ‚ù?| Identifier for who/what submitted this |
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "id": "uuid-of-push-item",
+  "path": "wiki/concepts/new-concept.md",
+  "content": "# New Concept\n\n...",
+  "notes": "Optional notes...",
+  "submittedBy": "agent",
+  "status": "pending"
+}
+```
+
+---
+
+## GET /api/v1/push/queue
+
+Get all pending push review items. Note: queue state is managed by the frontend; this endpoint emits an event for the frontend to respond with current state.
+
+**Auth:** required.
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "items": [],
+  "note": "Queue state is managed by the frontend. This endpoint emits an event for the frontend to respond with current state."
+}
+```
+
+---
+
+## POST /api/v1/push/{id}/approve
+
+Approve a push review item. Triggers file write and subsequent ingest.
+
+**Auth:** required.
+
+**Request body (optional):**
+
+```json
+{
+  "path": "wiki/concepts/new-concept.md",
+  "content": "# New Concept\n\nContent..."
+}
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "id": "uuid-of-push-item",
+  "status": "approved",
+  "note": "Approval event emitted. Frontend will handle file write and ingest."
+}
+```
+
+---
+
+## POST /api/v1/push/{id}/reject
+
+Reject a push review item. The item is discarded.
+
+**Auth:** required.
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "id": "uuid-of-push-item",
+  "status": "rejected"
+}
+```
+
+---
+
+## PATCH /api/v1/push/{id}
+
+Update a push review item's content or review notes.
+
+**Auth:** required.
+
+**Request body:**
+
+```json
+{
+  "content": "Updated content...",
+  "reviewNotes": "Reviewer notes..."
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `content` | string | ‚ù?| New document content |
+| `reviewNotes` | string | ‚ù?| Updated review notes |
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "id": "uuid-of-push-item",
+  "note": "Update event emitted. Frontend will handle the actual store update."
+}
+```
 
 ---
 
@@ -357,14 +559,14 @@ The user's `sourceWatchConfig` (file type filters, exclude dirs, max size) is ho
 
 | Limit | Value | Effect |
 |---|---|---|
-| Body size | 1 MiB | Exceed ‚Üí 400. |
-| File content read | 2 MiB | Exceed ‚Üí 413. |
-| File-tree node count | 10000 hard cap | Exceed ‚Üí 413. |
+| Body size | 1 MiB | Exceed ‚Ü?400. |
+| File content read | 2 MiB | Exceed ‚Ü?413. |
+| File-tree node count | 10000 hard cap | Exceed ‚Ü?413. |
 | Search `topK` | 50 max | Silently clamped. |
 | Graph `limit` | 1000 max | Silently clamped. |
-| Rate limit | 120 req/sec (global) | 429 with `Retry-After` semantics implied (back off ‚â•1s). |
-| In-flight requests | 64 concurrent | 503 "API server is busy" ‚Äî back off ‚â•2s. |
+| Rate limit | 120 req/sec (global) | 429 with `Retry-After` semantics implied (back off ‚â?s). |
+| In-flight requests | 64 concurrent | 503 "API server is busy" ‚Ä?back off ‚â?s. |
 
 CORS: `Access-Control-Allow-Origin: *`. Preflight cached 10 min via `Access-Control-Max-Age: 600`. Allowed headers include `Authorization`, `X-LLM-Wiki-Token`, `Content-Type`.
 
-Non-`GET` / non-`POST` methods ‚Üí 405.
+Non-`GET` / non-`POST` methods ‚Ü?405.

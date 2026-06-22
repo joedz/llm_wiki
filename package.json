@@ -2,6 +2,8 @@
   "name": "llm-wiki",
   "private": true,
   "version": "0.4.20",
+  "description": "A personal knowledge base that builds itself — LLM reads your documents, builds a structured wiki, and keeps it current.",
+  "keywords": ["knowledge-base", "wiki", "llm", "rag", "note-taking", "productivity", "desktop-app", "tauri", "react"],
   "type": "module",
   "scripts": {
     "dev": "vite",
