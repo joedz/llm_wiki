@@ -111,6 +111,7 @@ export async function runProjectChat(
         purpose: "",
         index: "",
         wikiPages: [],
+        codeContext: null,
         externalResults: [],
         references: [],
         warnings: [],

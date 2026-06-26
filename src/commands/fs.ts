@@ -19,10 +19,12 @@ export async function readFile(
 }
 
 export async function writeFile(path: string, contents: string): Promise<void> {
+  assertWritableProjectPath(path)
   return invoke<void>("write_file", { path, contents })
 }
 
 export async function writeFileAtomic(path: string, contents: string): Promise<void> {
+  assertWritableProjectPath(path)
   return invoke<void>("write_file_atomic", { path, contents })
 }
 
@@ -49,7 +51,15 @@ export async function preprocessFile(path: string): Promise<string> {
 }
 
 export async function deleteFile(path: string): Promise<void> {
+  assertWritableProjectPath(path)
   return invoke("delete_file", { path })
+}
+
+function assertWritableProjectPath(path: string): void {
+  const normalized = path.replace(/\\/g, "/").toLowerCase()
+  if (normalized.includes("/raw/code/") || normalized.startsWith("raw/code/")) {
+    throw new Error("Code sources are read-only in llm_wiki")
+  }
 }
 
 export async function findRelatedWikiPages(

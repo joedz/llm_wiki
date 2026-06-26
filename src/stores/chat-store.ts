@@ -12,7 +12,7 @@ export interface Conversation {
 export interface MessageReference {
   title: string
   path: string
-  kind?: "wiki" | "external"
+  kind?: "wiki" | "external" | "code"
   source?: string
   url?: string
   snippet?: string

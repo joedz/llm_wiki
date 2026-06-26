@@ -5,12 +5,13 @@ import { buildRetrievalGraph, getRelatedNodes } from "@/lib/graph-relevance"
 import { getFileName, getRelativePath, normalizePath } from "@/lib/path-utils"
 import { searchWiki, tokenizeQuery, type SearchResult } from "@/lib/search"
 import { resolveSearchConfig, webSearch, type WebSearchResult } from "@/lib/web-search"
+import { buildCodeAnalysisContext, type CodeAnalysisContext } from "./code-analysis"
 import type { ChatRuntimeConfig } from "./chat-runtime-config"
 
 export interface ChatReference {
   title: string
   path: string
-  kind: "wiki" | "external"
+  kind: "wiki" | "external" | "code"
   source?: string
   url?: string
   snippet?: string
@@ -28,6 +29,7 @@ export interface ChatRetrievedContext {
   purpose: string
   index: string
   wikiPages: ChatRetrievedPage[]
+  codeContext: CodeAnalysisContext | null
   externalResults: WebSearchResult[]
   references: ChatReference[]
   warnings: string[]
@@ -237,7 +239,7 @@ export async function buildChatRetrievalContext(
   const projectPath = normalizePath(input.projectPath)
   const { indexBudget } = computeContextBudget(input.config.llmConfig.maxContextSize)
 
-  const [rawIndex, purpose, wikiPages, external] = await Promise.all([
+  const [rawIndex, purpose, wikiPages, codeContext, external] = await Promise.all([
     readFile(`${projectPath}/wiki/index.md`).catch(() => ""),
     readFile(`${projectPath}/purpose.md`).catch(() => ""),
     buildRelevantPages(
@@ -246,6 +248,11 @@ export async function buildChatRetrievalContext(
       input.config.llmConfig.maxContextSize,
       input.config.dataVersion,
     ),
+    buildCodeAnalysisContext({
+      projectPath,
+      message: input.message,
+      maxContextSize: input.config.llmConfig.maxContextSize,
+    }),
     collectExternalResults(input, projectPath),
   ])
 
@@ -264,12 +271,14 @@ export async function buildChatRetrievalContext(
       url: result.url,
       snippet: result.snippet,
     })),
+    ...(codeContext?.references ?? []),
   ]
 
   return {
     purpose,
     index: trimIndex(rawIndex, input.message, indexBudget),
     wikiPages,
+    codeContext,
     externalResults: external.externalResults,
     references,
     warnings: external.warnings,

@@ -18,6 +18,7 @@ import {
   importSourceFiles,
   importSourceFolder,
 } from "@/lib/source-lifecycle"
+import { RAW_CODE_ROOT, isCodeSourcePath } from "@/lib/code-analysis"
 
 const SOURCE_TREE_INITIAL_ROWS = 160
 const SOURCE_TREE_LOAD_BATCH = 160
@@ -64,16 +65,19 @@ export function SourcesView() {
     if (!project) return
     const pp = normalizePath(project.path)
     try {
-      const tree = await listDirectory(`${pp}/raw/sources`)
-      // Filter out hidden files/dirs and cache
-      const filtered = filterTree(tree)
-      setSources(filtered)
+      const [textTree, codeTree] = await Promise.all([
+        listDirectory(`${pp}/raw/sources`).catch(() => []),
+        listDirectory(`${pp}/${RAW_CODE_ROOT}`).catch(() => []),
+      ])
+      const textSources = filterTree(textTree)
+      const codeSources = filterTree(codeTree)
+      setSources(buildSourceRootNodes(pp, textSources, codeSources, t))
       setRefreshError(null)
     } catch (err) {
       setRefreshError(String(err))
       setSources([])
     }
-  }, [project])
+  }, [project, t])
 
   useEffect(() => {
     loadSources()
@@ -362,6 +366,7 @@ export function SourcesView() {
 interface SourceTreeRow {
   node: FileNode
   depth: number
+  sourceKind: "text" | "code"
 }
 
 function filterTree(nodes: FileNode[]): FileNode[] {
@@ -388,6 +393,33 @@ function countFiles(nodes: FileNode[]): number {
   return count
 }
 
+function buildSourceRootNodes(
+  projectPath: string,
+  textSources: FileNode[],
+  codeSources: FileNode[],
+  t: ReturnType<typeof useTranslation>["t"],
+): FileNode[] {
+  return [
+    {
+      name: t("sources.textSources", "Text Sources"),
+      path: `${projectPath}/raw/sources`,
+      is_dir: true,
+      children: textSources,
+    },
+    {
+      name: t("sources.codeSources", "Code Sources"),
+      path: `${projectPath}/${RAW_CODE_ROOT}`,
+      is_dir: true,
+      children: codeSources,
+    },
+  ]
+}
+
+function isSourceRootNode(node: FileNode): boolean {
+  const normalized = normalizePath(node.path)
+  return normalized.endsWith("/raw/sources") || normalized.endsWith(`/${RAW_CODE_ROOT}`)
+}
+
 function sortSourceNodes(nodes: readonly FileNode[]): FileNode[] {
   return [...nodes].sort((a, b) => {
     if (a.is_dir && !b.is_dir) return -1
@@ -400,12 +432,14 @@ function flattenVisibleRows(
   nodes: readonly FileNode[],
   collapsed: Record<string, boolean>,
   depth = 0,
+  sourceKind: "text" | "code" = "text",
 ): SourceTreeRow[] {
   const rows: SourceTreeRow[] = []
   for (const node of sortSourceNodes(nodes)) {
-    rows.push({ node, depth })
+    const kind = isCodeSourcePath(node.path) ? "code" : sourceKind
+    rows.push({ node, depth, sourceKind: kind })
     if (node.is_dir && node.children && !(collapsed[node.path] ?? false)) {
-      rows.push(...flattenVisibleRows(node.children, collapsed, depth + 1))
+      rows.push(...flattenVisibleRows(node.children, collapsed, depth + 1, kind))
     }
   }
   return rows
@@ -489,10 +523,11 @@ function SourceTree({
 
   return (
     <>
-      {visibleRows.map(({ node, depth }) => {
+      {visibleRows.map(({ node, depth, sourceKind }) => {
         const isPendingDelete = pendingDeletePath === node.path
         if (node.is_dir && node.children) {
           const isCollapsed = collapsed[node.path] ?? false
+          const canMutateFolder = sourceKind === "text" && !isSourceRootNode(node)
           return (
             <div key={node.path}>
               <div
@@ -514,15 +549,17 @@ function SourceTree({
                     {countFiles(node.children)}
                   </span>
                 </button>
-                <DeleteButton
-                  isPending={isPendingDelete}
-                  onClick={() => handleDeleteClick(node)}
-                  hint={
-                    isPendingDelete
-                      ? t("sources.deleteFolderConfirm", { name: node.name })
-                      : t("sources.deleteFolder", { name: node.name })
-                  }
-                />
+                {canMutateFolder && (
+                  <DeleteButton
+                    isPending={isPendingDelete}
+                    onClick={() => handleDeleteClick(node)}
+                    hint={
+                      isPendingDelete
+                        ? t("sources.deleteFolderConfirm", { name: node.name })
+                        : t("sources.deleteFolder", { name: node.name })
+                    }
+                  />
+                )}
               </div>
             </div>
           )
@@ -541,25 +578,29 @@ function SourceTree({
               <FileText className="h-4 w-4 shrink-0" />
               <span className="truncate">{node.name}</span>
             </button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7 shrink-0"
-              title={t("sources.ingest")}
-              disabled={ingestingPath === node.path}
-              onClick={() => onIngest(node)}
-            >
-              <BookOpen className="h-4 w-4" />
-            </Button>
-            <DeleteButton
-              isPending={isPendingDelete}
-              onClick={() => handleDeleteClick(node)}
-              hint={
-                isPendingDelete
-                  ? t("sources.deleteFileConfirm", { name: node.name })
-                  : t("sources.deleteFile", { name: node.name })
-              }
-            />
+            {sourceKind === "text" && (
+              <>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 shrink-0"
+                  title={t("sources.ingest")}
+                  disabled={ingestingPath === node.path}
+                  onClick={() => onIngest(node)}
+                >
+                  <BookOpen className="h-4 w-4" />
+                </Button>
+                <DeleteButton
+                  isPending={isPendingDelete}
+                  onClick={() => handleDeleteClick(node)}
+                  hint={
+                    isPendingDelete
+                      ? t("sources.deleteFileConfirm", { name: node.name })
+                      : t("sources.deleteFile", { name: node.name })
+                  }
+                />
+              </>
+            )}
           </div>
         )
       })}

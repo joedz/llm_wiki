@@ -22,6 +22,7 @@ fn create_project_impl(name: String, path: String) -> Result<WikiProject, String
 
     // Create all required subdirectories
     let dirs = [
+        "raw/code",
         "raw/sources",
         "raw/assets",
         "wiki/entities",
@@ -219,7 +220,7 @@ related: []
     write_file_inner(root.join(".obsidian/appearance.json"), obsidian_appearance)?;
 
     // Enable graph view and backlinks core plugins
-    let obsidian_core_plugins = r#"{
+    let core_plugins = r#"{
   "file-explorer": true,
   "global-search": true,
   "graph": true,
@@ -229,10 +230,7 @@ related: []
   "outgoing-link": true,
   "starred": true
 }"#;
-    write_file_inner(
-        root.join(".obsidian/core-plugins.json"),
-        obsidian_core_plugins,
-    )?;
+    write_file_inner(root.join(".obsidian/core-plugins.json"), core_plugins)?;
 
     Ok(WikiProject {
         name,
@@ -326,3 +324,7 @@ fn write_file_inner(path: std::path::PathBuf, contents: &str) -> Result<(), Stri
     fs::write(&path, contents)
         .map_err(|e| format!("Failed to write file '{}': {}", path.display(), e))
 }
+
+#[cfg(test)]
+#[path = "project_tests.rs"]
+mod tests;

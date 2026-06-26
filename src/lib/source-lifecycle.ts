@@ -18,6 +18,7 @@ import {
   sourceIdentityForPath,
   sourceReferenceIdentity,
 } from "@/lib/source-identity"
+import { RAW_CODE_ROOT, isCodeSourceExtension } from "@/lib/code-analysis"
 import {
   parseFrontmatterArray,
   parseSources,
@@ -148,7 +149,9 @@ export async function importSourceFiles(
 
   for (const sourcePath of sourcePaths) {
     const originalName = getFileName(sourcePath) || "unknown"
+    const isCode = isCodeSourceExtension(sourcePath)
     let allowed = isPathAllowedBySourceWatch(sourcePath, cfg)
+    if (isCode) allowed = true
     if (allowed) {
       try {
         allowed = await getFileSize(sourcePath) <= maxBytes
@@ -158,17 +161,24 @@ export async function importSourceFiles(
     }
     if (!allowed) continue
 
-    const destPath = await getUniqueDestPath(`${pp}/raw/sources`, originalName)
+    const destRoot = isCode ? `${pp}/${RAW_CODE_ROOT}` : `${pp}/raw/sources`
+    const destPath = await getUniqueDestPath(destRoot, originalName)
     try {
       await copyFile(sourcePath, destPath)
       importedPaths.push(destPath)
-      preprocessFile(destPath).catch(() => {})
+      if (!isCode) {
+        preprocessFile(destPath).catch(() => {})
+      }
     } catch (err) {
       console.error(`Failed to import ${originalName}:`, err)
     }
   }
 
-  await enqueueSourceIngest(project, importedPaths, llmConfig)
+  await enqueueSourceIngest(
+    project,
+    importedPaths.filter((path) => !isCodeSourcePathWithinProject(pp, path)),
+    llmConfig,
+  )
 
   return importedPaths
 }
@@ -183,6 +193,7 @@ export async function importSourceFolder(
   const sourceRoot = normalizePath(selectedFolder)
   const folderName = getFileName(selectedFolder) || "imported"
   const destDir = `${pp}/raw/sources/${folderName}`
+  const codeDestDir = `${pp}/${RAW_CODE_ROOT}/${folderName}`
   const cfg = normalizeSourceWatchConfig(sourceWatchConfig)
   const maxBytes = cfg.maxFileSizeMb * 1024 * 1024
   const allowedFiles: string[] = []
@@ -190,9 +201,12 @@ export async function importSourceFolder(
 
   for (const file of sourceFiles) {
     const relativeSourcePath = getRelativePath(file.path, sourceRoot)
-    const destPath = `${destDir}/${relativeSourcePath}`
+    const isCode = isCodeSourceExtension(file.path)
+    const destPath = isCode
+      ? `${codeDestDir}/${relativeSourcePath}`
+      : `${destDir}/${relativeSourcePath}`
     const relPath = `raw/sources/${folderName}/${relativeSourcePath}`
-    let allowed = isPathAllowedBySourceWatch(relPath, cfg)
+    let allowed = isCode || isPathAllowedBySourceWatch(relPath, cfg)
     if (allowed) {
       try {
         allowed = await getFileSize(file.path) <= maxBytes
@@ -205,17 +219,24 @@ export async function importSourceFolder(
     if (parent) await createDirectory(parent)
     await copyFile(file.path, destPath)
     allowedFiles.push(destPath)
-    preprocessFile(destPath).catch(() => {})
+    if (!isCode) {
+      preprocessFile(destPath).catch(() => {})
+    }
   }
 
   if (hasUsableLlm(llmConfig)) {
-    await enqueueSourceIngest(project, allowedFiles, llmConfig, {
+    await enqueueSourceIngest(project, allowedFiles.filter((path) => !isCodeSourcePathWithinProject(pp, path)), llmConfig, {
       sourceRoot: destDir,
       rootContext: folderName,
     })
   }
 
   return allowedFiles
+}
+
+function isCodeSourcePathWithinProject(projectPath: string, path: string): boolean {
+  const pp = normalizePath(projectPath).replace(/\/+$/, "")
+  return normalizePath(path).toLowerCase().startsWith(`${pp}/${RAW_CODE_ROOT}/`.toLowerCase())
 }
 
 export async function deleteSourceFile(

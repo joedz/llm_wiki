@@ -286,7 +286,7 @@ pub fn start_project_file_watcher(
         watcher
             .watch(&root, RecursiveMode::Recursive)
             .map_err(|e| format!("Failed to watch '{}': {e}", root.display()))?;
-        for rel in ["raw/sources", "wiki"] {
+        for rel in ["raw/code", "raw/sources", "wiki"] {
             let path = root.join(rel);
             if path.exists() {
                 if let Err(err) = watcher.watch(&path, RecursiveMode::Recursive) {
@@ -521,7 +521,7 @@ fn rescan_watch_roots(
     enqueue_rescan_changes_for_prefixes(
         root,
         project_id,
-        &["raw/sources", "wiki", "purpose.md", "schema.md"],
+        &["raw/code", "raw/sources", "wiki", "purpose.md", "schema.md"],
         source_watch_config,
     )?;
     if !is_active_watcher_generation(watcher_generation) {
@@ -1087,6 +1087,9 @@ fn should_watch_rel(rel: &str, rules: &SourceWatchRules) -> bool {
     {
         return false;
     }
+    if rel.starts_with("raw/code/") {
+        return true;
+    }
     if rel.starts_with("raw/sources/") {
         let ext = extension_of(name);
         if !ext.is_empty() && rules.exclude_extensions.contains(ext) {
@@ -1511,6 +1514,34 @@ mod tests {
     }
 
     #[test]
+    fn prefix_rescan_detects_raw_code_changes() {
+        let root = temp_root("code-prefix-rescan");
+        fs::create_dir_all(root.join("raw/code")).unwrap();
+        let old = "raw/code/old.ts";
+        let new = "raw/code/new.ts";
+        fs::write(root.join(old), "export const oldValue = 1").unwrap();
+
+        ensure_sync_dir(&root).unwrap();
+        sync_snapshot_paths(&root, BTreeSet::from([old.to_string()])).unwrap();
+        fs::remove_file(root.join(old)).unwrap();
+        fs::write(root.join(new), "export const newValue = 1").unwrap();
+
+        enqueue_rescan_changes_for_prefixes(&root, "p1", &["raw/code"], &default_watch_config())
+            .unwrap();
+        let queue = read_queue(&root).unwrap();
+        let by_path = queue
+            .tasks
+            .iter()
+            .map(|task| (task.path.as_str(), task.kind.clone()))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(by_path.get(old), Some(&FileChangeKind::Deleted));
+        assert_eq!(by_path.get(new), Some(&FileChangeKind::Created));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn app_written_paths_update_snapshot_without_queueing() {
         let root = temp_root("app-write");
         let rel = "raw/sources/a.md";
@@ -1589,6 +1620,7 @@ mod tests {
     fn watch_rules_exclude_temporary_and_app_dirs() {
         let config = default_watch_config();
         let rules = SourceWatchRules::new(&config);
+        assert!(should_watch_rel("raw/code/app.ts", &rules));
         assert!(should_watch_rel("raw/sources/document.docx", &rules));
         assert!(should_watch_rel("wiki/concepts/topic.md", &rules));
         assert!(!should_watch_rel(
@@ -1618,6 +1650,7 @@ mod tests {
         let config = normalize_source_watch_config(Some(config));
         let rules = SourceWatchRules::new(&config);
 
+        assert!(should_watch_rel("raw/code/app.ts", &rules));
         assert!(should_watch_rel("raw/sources/final.md", &rules));
         assert!(!should_watch_rel("raw/sources/data.json", &rules));
         assert!(!should_watch_rel("raw/sources/drafts/final.md", &rules));

@@ -759,8 +759,9 @@ fn handle_files(app: &AppHandle, project_id: &str, query: &str) -> ApiResponse {
     let rel = match root {
         "wiki" => "wiki",
         "sources" | "raw" | "raw/sources" => "raw/sources",
+        "code" | "raw/code" => "raw/code",
         "all" | "" => "",
-        _ => return err(400, "root must be wiki, sources, or all"),
+        _ => return err(400, "root must be wiki, sources, code, or all"),
     };
     if rel.is_empty() {
         return match list_public_roots(&project.path, recursive, max_files) {
@@ -885,6 +886,7 @@ fn is_public_project_rel(rel: &str) -> bool {
     lower == "purpose.md"
         || lower == "schema.md"
         || lower.starts_with("wiki/")
+        || lower.starts_with("raw/code/")
         || lower.starts_with("raw/sources/")
 }
 
@@ -927,7 +929,7 @@ fn list_public_roots(
 ) -> Result<Vec<ApiFileNode>, String> {
     let mut count = 0;
     let mut roots = Vec::new();
-    for rel in ["purpose.md", "schema.md", "wiki", "raw/sources"] {
+    for rel in ["purpose.md", "schema.md", "wiki", "raw/sources", "raw/code"] {
         let path = safe_join(project_path, rel)?;
         if !path.exists() {
             continue;
@@ -1741,10 +1743,13 @@ mod tests {
     fn public_api_paths_exclude_internal_state() {
         assert!(is_public_project_rel("wiki/index.md"));
         assert!(is_public_project_rel("Wiki/index.md"));
+        assert!(is_public_project_rel("raw/code/app.ts"));
+        assert!(is_public_project_rel("Raw/Code/app.ts"));
         assert!(is_public_project_rel("raw/sources/source.md"));
         assert!(is_public_project_rel("Raw/Sources/source.md"));
         assert!(!is_public_project_rel(".llm-wiki/file-change-queue.json"));
         assert!(!is_public_project_rel("wiki/.draft.md"));
+        assert!(!is_public_project_rel("raw/code/.env"));
     }
 
     #[test]

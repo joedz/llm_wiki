@@ -49,3 +49,7 @@ pnpm-debug.log*
 # Brainstorm assets (not tracked in source control)
 .superpowers/
 .claude/
+
+# Local tooling runtime data
+.omo/
+Understand-Anything/

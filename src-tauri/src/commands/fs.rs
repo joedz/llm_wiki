@@ -942,6 +942,7 @@ pub async fn write_file(path: String, contents: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         run_guarded("write_file", || {
             let p = Path::new(&path);
+            ensure_not_code_source_path(p)?;
             if let Some(parent) = p.parent() {
                 fs::create_dir_all(parent)
                     .map_err(|e| format!("Failed to create parent dirs for '{}': {}", path, e))?;
@@ -962,6 +963,7 @@ pub async fn write_file_atomic(path: String, contents: String) -> Result<(), Str
     tauri::async_runtime::spawn_blocking(move || {
         run_guarded("write_file_atomic", || {
             let p = Path::new(&path);
+            ensure_not_code_source_path(p)?;
             if let Some(parent) = p.parent() {
                 fs::create_dir_all(parent)
                     .map_err(|e| format!("Failed to create parent dirs for '{}': {}", path, e))?;
@@ -1165,6 +1167,7 @@ pub async fn delete_file(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         run_guarded("delete_file", || {
             let p = Path::new(&path);
+            ensure_not_code_source_path(p)?;
             file_sync::mark_app_write_path(p);
             if p.is_dir() {
                 remove_path_with_retry(&path, true)
@@ -1365,12 +1368,25 @@ fn collect_related_pages(
 pub async fn create_directory(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         run_guarded("create_directory", || {
+            ensure_not_code_source_path(Path::new(&path))?;
             fs::create_dir_all(&path)
                 .map_err(|e| format!("Failed to create directory '{}': {}", path, e))
         })
     })
     .await
     .map_err(|e| format!("create_directory blocking task join error: {e}"))?
+}
+
+fn ensure_not_code_source_path(path: &Path) -> Result<(), String> {
+    if is_code_source_path(path) {
+        return Err("Code sources are read-only in llm_wiki".to_string());
+    }
+    Ok(())
+}
+
+fn is_code_source_path(path: &Path) -> bool {
+    let normalized = path.to_string_lossy().replace('\\', "/").to_lowercase();
+    normalized.contains("/raw/code/") || normalized.ends_with("/raw/code")
 }
 
 /// Read any file as base64 + a guessed mime type. Used by the
@@ -1849,6 +1865,19 @@ mod tests {
         let got = collect(&wiki, "nonexistent.md");
         assert!(got.is_empty());
         let _ = fs::remove_dir_all(&wiki);
+    }
+
+    #[test]
+    fn code_source_paths_are_read_only_targets() {
+        assert!(is_code_source_path(Path::new("/project/raw/code/app.ts")));
+        assert!(is_code_source_path(Path::new(
+            "C:\\project\\raw\\code\\app.ts"
+        )));
+        assert!(is_code_source_path(Path::new("/project/raw/code")));
+        assert!(!is_code_source_path(Path::new(
+            "/project/raw/sources/app.ts"
+        )));
+        assert!(!is_code_source_path(Path::new("/project/wiki/app.ts")));
     }
 
     #[test]

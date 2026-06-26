@@ -146,4 +146,43 @@ describe("source-lifecycle path helpers", () => {
       },
     ])
   })
+
+  it("copies code files into raw/code without enqueueing text ingest", async () => {
+    const copied = await importSourceFiles(
+      { id: "p1", name: "Project", path: "/project" },
+      ["/external/src/app.ts", "/external/readme.md"],
+      {
+        provider: "openai",
+        endpoint: "https://api.example.com/v1",
+        apiKey: "key",
+        model: "model",
+        customModel: "",
+        reasoning: { enabled: false, effort: "low" },
+      } as never,
+      {
+        enabled: true,
+        autoIngest: true,
+        includeExtensions: ["md"],
+        excludeExtensions: [],
+        excludeDirs: [],
+        excludeGlobs: [],
+        maxFileSizeMb: 100,
+      },
+    )
+
+    expect(copied).toEqual([
+      "/project/raw/code/app.ts",
+      "/project/raw/sources/readme.md",
+    ])
+    expect(mocks.copyFile).toHaveBeenCalledWith("/external/src/app.ts", "/project/raw/code/app.ts")
+    expect(mocks.copyFile).toHaveBeenCalledWith("/external/readme.md", "/project/raw/sources/readme.md")
+    expect(mocks.preprocessFile).toHaveBeenCalledOnce()
+    expect(mocks.preprocessFile).toHaveBeenCalledWith("/project/raw/sources/readme.md")
+    expect(mocks.enqueueBatch).toHaveBeenCalledWith("p1", [
+      {
+        sourcePath: "/project/raw/sources/readme.md",
+        folderContext: "",
+      },
+    ])
+  })
 })

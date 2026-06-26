@@ -23,6 +23,7 @@ describe("buildChatPromptMessages", () => {
             priority: 0,
           },
         ],
+        codeContext: null,
         externalResults: [],
         references: [
           {
@@ -58,6 +59,7 @@ describe("buildChatPromptMessages", () => {
         purpose: "",
         index: "",
         wikiPages: [],
+        codeContext: null,
         externalResults: [
           {
             title: "RAG News",
@@ -85,5 +87,64 @@ describe("buildChatPromptMessages", () => {
     expect(messages[0].content).toContain("### [E1] RAG News")
     expect(messages[0].content).toContain("## External Source Errors")
     expect(messages[0].content).toContain("- Web Search: timed out")
+  })
+
+  it("includes code-analysis context separately from wiki pages", () => {
+    const messages = buildChatPromptMessages({
+      projectName: "Demo",
+      message: "谁调用了 runPlan",
+      history: [],
+      outputLanguage: "Chinese",
+      retrieval: {
+        purpose: "",
+        index: "",
+        wikiPages: [],
+        codeContext: {
+          snippets: [
+            {
+              filePath: "raw/code/demo/app.ts",
+              symbolName: "runPlan",
+              language: "TypeScript",
+              content: "export function runPlan() {\n  return buildAnswer()\n}",
+              startLine: 1,
+              endLine: 3,
+              reason: "symbol-match",
+            },
+          ],
+          relationships: [
+            {
+              type: "calls",
+              source: "handleChat",
+              target: "runPlan",
+              sourcePath: "raw/code/demo/routes.ts",
+              targetPath: "raw/code/demo/app.ts",
+              line: 4,
+            },
+          ],
+          references: [
+            {
+              title: "runPlan",
+              path: "raw/code/demo/app.ts",
+              kind: "code",
+              snippet: "export function runPlan()",
+            },
+          ],
+        },
+        externalResults: [],
+        references: [
+          {
+            title: "runPlan",
+            path: "raw/code/demo/app.ts",
+            kind: "code",
+            snippet: "export function runPlan()",
+          },
+        ],
+        warnings: [],
+      },
+    })
+
+    expect(messages[0].content).toContain("## Code Analysis Context")
+    expect(messages[0].content).toContain("### [C1] runPlan")
+    expect(messages[0].content).toContain("calls: handleChat -> runPlan")
   })
 })

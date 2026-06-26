@@ -7,7 +7,7 @@ import "katex/dist/katex.min.css"
 import {
   Bot, User, FileText, BookmarkPlus, ChevronDown, ChevronRight, RefreshCw, Copy, Check,
   Users, Lightbulb, BookOpen, HelpCircle, GitMerge, BarChart3, Layout, Globe,
-  TrendingUp, Target, Image as ImageIcon, FileSearch,
+  TrendingUp, Target, Image as ImageIcon, FileSearch, Code2,
 } from "lucide-react"
 import { openUrl } from "@tauri-apps/plugin-opener"
 import { useWikiStore } from "@/stores/wiki-store"
@@ -288,9 +288,11 @@ const REF_TYPE_CONFIG: Record<string, { icon: typeof FileText; color: string }> 
   clip: { icon: Globe, color: "text-blue-400" },
   external: { icon: Globe, color: "text-sky-500" },
   anytxt: { icon: FileSearch, color: "text-emerald-500" },
+  code: { icon: Code2, color: "text-indigo-500" },
 }
 
 function getRefType(path: string, page?: CitedPage): string {
+  if (page?.kind === "code") return "code"
   if (page?.kind === "external") {
     return page.source?.toLowerCase() === "anytxt" ? "anytxt" : "external"
   }
@@ -371,7 +373,7 @@ function CitedReferencesPanel({ content, savedReferences }: { content: string; s
         // Try the path verbatim first, then the same fallback set
         // the click-handler uses below — keeps "is the file on
         // disk" check consistent across the panel.
-        if (page.kind === "external") {
+        if (page.kind === "external" || page.kind === "code") {
           return [page.path, { count: 0, firstUrl: null }] as const
         }
         const id = getFileName(page.path.replace(/^wiki\//, "").replace(/\.md$/, ""))
@@ -484,6 +486,18 @@ function CitedReferencesPanel({ content, savedReferences }: { content: string; s
           const info = imageInfos[page.path]
           const hasImages = (info?.count ?? 0) > 0
           const openCitedPage = async () => {
+            if (page.kind === "code") {
+              if (!project) return
+              const candidate = `${normalizePath(project.path)}/${page.path}`
+              try {
+                const content = await readFile(candidate)
+                setSelectedFile(candidate)
+                setFileContent(content)
+              } catch (err) {
+                console.warn("[chat refs] failed to open code reference:", err)
+              }
+              return
+            }
             if (page.kind === "external") {
               const target = page.url || page.path
               if (page.source?.toLowerCase() === "anytxt") {
