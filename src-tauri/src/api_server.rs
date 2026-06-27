@@ -760,8 +760,9 @@ fn handle_files(app: &AppHandle, project_id: &str, query: &str) -> ApiResponse {
         "wiki" => "wiki",
         "sources" | "raw" | "raw/sources" => "raw/sources",
         "code" | "raw/code" => "raw/code",
+        "code_wiki" | "wiki/code_wiki" => "wiki/code_wiki",
         "all" | "" => "",
-        _ => return err(400, "root must be wiki, sources, code, or all"),
+        _ => return err(400, "root must be wiki, sources, code, code_wiki, or all"),
     };
     if rel.is_empty() {
         return match list_public_roots(&project.path, recursive, max_files) {
@@ -929,7 +930,7 @@ fn list_public_roots(
 ) -> Result<Vec<ApiFileNode>, String> {
     let mut count = 0;
     let mut roots = Vec::new();
-    for rel in ["purpose.md", "schema.md", "wiki", "raw/sources", "raw/code"] {
+    for rel in ["purpose.md", "schema.md", "wiki", "raw/sources", "raw/code", "wiki/code_wiki"] {
         let path = safe_join(project_path, rel)?;
         if !path.exists() {
             continue;
