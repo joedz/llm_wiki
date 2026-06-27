@@ -6,6 +6,7 @@ import { getFileName, getRelativePath, normalizePath } from "@/lib/path-utils"
 import { searchWiki, tokenizeQuery, type SearchResult } from "@/lib/search"
 import { resolveSearchConfig, webSearch, type WebSearchResult } from "@/lib/web-search"
 import { buildCodeAnalysisContext, type CodeAnalysisContext } from "./code-analysis"
+import { readIndex as readCodeWikiIndex, readGraph as readCodeWikiGraph, queryGraph } from "@/lib/code-wiki"
 import type { ChatRuntimeConfig } from "./chat-runtime-config"
 
 export interface ChatReference {
@@ -233,6 +234,43 @@ async function buildRelevantPages(
   return relevantPages
 }
 
+async function buildCodeWikiOrFallbackContext(
+  projectPath: string,
+  message: string,
+  maxContextSize: number,
+): Promise<CodeAnalysisContext | null> {
+  try {
+    const index = await readCodeWikiIndex(projectPath)
+    if (index.repos.length > 0) {
+      const snippets: CodeAnalysisContext["snippets"] = []
+      const relationships: CodeAnalysisContext["relationships"] = []
+      const references: CodeAnalysisContext["references"] = []
+      let totalChars = 0
+      const perRepoBudget = Math.max(2_000, Math.floor(maxContextSize / index.repos.length))
+      for (const repo of index.repos) {
+        if (totalChars >= maxContextSize) break
+        const graph = await readCodeWikiGraph(projectPath, repo.name)
+        if (!graph) continue
+        const result = queryGraph({ graph, message, hops: 1, maxContextSize: perRepoBudget })
+        for (const s of result.snippets) {
+          if (totalChars + s.content.length > maxContextSize) break
+          snippets.push(s)
+          totalChars += s.content.length
+        }
+        relationships.push(...result.relationships)
+        references.push(...result.references)
+        if (snippets.length === 0 && relationships.length === 0) continue
+      }
+      if (snippets.length > 0 || relationships.length > 0) {
+        return { snippets, relationships, references }
+      }
+    }
+  } catch (err) {
+    console.warn("[code-wiki] query failed, falling back to live scan:", err)
+  }
+  return buildCodeAnalysisContext({ projectPath, message, maxContextSize })
+}
+
 export async function buildChatRetrievalContext(
   input: BuildChatRetrievalContextInput,
 ): Promise<ChatRetrievedContext> {
@@ -248,11 +286,7 @@ export async function buildChatRetrievalContext(
       input.config.llmConfig.maxContextSize,
       input.config.dataVersion,
     ),
-    buildCodeAnalysisContext({
-      projectPath,
-      message: input.message,
-      maxContextSize: input.config.llmConfig.maxContextSize,
-    }),
+    buildCodeWikiOrFallbackContext(projectPath, input.message, input.config.llmConfig.maxContextSize),
     collectExternalResults(input, projectPath),
   ])
 
