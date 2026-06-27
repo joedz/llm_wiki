@@ -54,3 +54,25 @@ fn read_index_returns_empty_when_missing() {
     assert!(index.repos.is_empty());
     let _ = fs::remove_dir_all(&project);
 }
+
+#[test]
+fn plan_index_command_uses_repo_path_not_codegraph_dir() {
+    let project = temp_root("plan-index");
+    let code_root = project.join("raw").join("code").join("repo-A");
+    fs::create_dir_all(&code_root).unwrap();
+    let plan = plan_index_invocation(&project, "repo-A");
+    assert_eq!(plan.codegraph_dir, codegraph_dir_for(&project, "repo-A"));
+    assert_eq!(plan.repo_root, code_root);
+    let _ = fs::remove_dir_all(&project);
+}
+
+#[test]
+fn affected_repos_from_changes_extracts_top_level_subdirs() {
+    let changes = vec![
+        "raw/code/repo-A/src/foo.ts".to_string(),
+        "raw/code/repo-B/lib/bar.rs".to_string(),
+        "raw/sources/notes.md".to_string(),
+    ];
+    let repos = affected_repos(&changes);
+    assert_eq!(repos, vec!["repo-A".to_string(), "repo-B".to_string()]);
+}

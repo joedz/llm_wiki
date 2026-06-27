@@ -242,6 +242,8 @@ pub fn run() {
             commands::code_wiki::code_wiki_list_repos,
             commands::code_wiki::code_wiki_get_index,
             commands::code_wiki::code_wiki_get_graph,
+            commands::code_wiki::code_wiki_run_indexer,
+            commands::code_wiki::code_wiki_run_sync,
             commands::file_sync::start_project_file_watcher,
             commands::file_sync::stop_project_file_watcher,
             commands::file_sync::rescan_project_files,

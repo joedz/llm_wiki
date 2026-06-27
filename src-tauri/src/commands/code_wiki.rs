@@ -175,6 +175,90 @@ pub async fn code_wiki_get_graph(
     .map_err(|e| format!("join error: {}", e))?
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct IndexInvocationPlan {
+    pub repo_root: PathBuf,
+    pub codegraph_dir: PathBuf,
+}
+
+pub fn plan_index_invocation(project_path: &Path, repo_name: &str) -> IndexInvocationPlan {
+    let repo_root = project_path.join("raw").join("code").join(repo_name);
+    let codegraph_dir = codegraph_dir_for(project_path, repo_name);
+    IndexInvocationPlan { repo_root, codegraph_dir }
+}
+
+pub fn run_indexer_inner(project_path: &Path, repo_name: &str) -> Result<(), String> {
+    let plan = plan_index_invocation(project_path, repo_name);
+    fs::create_dir_all(&plan.codegraph_dir)
+        .map_err(|e| format!("mkdir codegraph dir: {}", e))?;
+    let init_status = std::process::Command::new("codegraph")
+        .arg("init")
+        .arg(&plan.repo_root)
+        .status()
+        .map_err(|e| format!("spawn codegraph init: {}", e))?;
+    if !init_status.success() {
+        return Err(format!(
+            "codegraph init exited with {:?}",
+            init_status.code()
+        ));
+    }
+    let index_status = std::process::Command::new("codegraph")
+        .arg("index")
+        .arg(&plan.repo_root)
+        .status()
+        .map_err(|e| format!("spawn codegraph index: {}", e))?;
+    if !index_status.success() {
+        return Err(format!(
+            "codegraph index exited with {:?}",
+            index_status.code()
+        ));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn code_wiki_run_indexer(project_path: String, repo_name: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        run_indexer_inner(Path::new(&project_path), &repo_name)
+    })
+    .await
+    .map_err(|e| format!("join error: {}", e))?
+}
+
+pub fn run_sync_inner(project_path: &Path, repo_name: &str) -> Result<(), String> {
+    let plan = plan_index_invocation(project_path, repo_name);
+    if !plan.repo_root.exists() {
+        return Err(format!("repo path {:?} no longer exists", plan.repo_root));
+    }
+    let status = std::process::Command::new("codegraph")
+        .arg("sync")
+        .arg(&plan.repo_root)
+        .status()
+        .map_err(|e| format!("spawn codegraph sync: {}", e))?;
+    if !status.success() {
+        return Err(format!("codegraph sync exited with {:?}", status.code()));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn code_wiki_run_sync(project_path: String, repo_name: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || run_sync_inner(Path::new(&project_path), &repo_name))
+        .await
+        .map_err(|e| format!("join error: {}", e))?
+}
+
+pub fn affected_repos(changes: &[String]) -> Vec<String> {
+    let mut set = std::collections::BTreeSet::new();
+    for change in changes {
+        let parts: Vec<&str> = change.split('/').collect();
+        if parts.len() >= 3 && parts[0] == "raw" && parts[1] == "code" {
+            set.insert(parts[2].to_string());
+        }
+    }
+    set.into_iter().collect()
+}
+
 #[cfg(test)]
 #[path = "code_wiki_tests.rs"]
 mod tests;
