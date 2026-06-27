@@ -11,3 +11,4 @@ export {
 } from "./types"
 
 export { readGraph, writeGraph, readIndex, writeIndex, readMeta, writeMeta, graphPathFor, repoRootFor, metaPathFor, indexPathFor, codegraphDirFor } from "./wiki-storage"
+export { detectRepos } from "./repo-detector"
