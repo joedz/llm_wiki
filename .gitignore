@@ -23,6 +23,11 @@ src-tauri/gen/
 
 # Internal docs (not shipped)
 docs/
+# Internal superpowers design specs and implementation plans are tracked
+!docs/superpowers/specs/
+!docs/superpowers/plans/
+!docs/superpowers/specs/**
+!docs/superpowers/plans/**
 AGENTS.md
 
 # Benchmark and test data (local only)
