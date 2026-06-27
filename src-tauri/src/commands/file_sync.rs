@@ -533,7 +533,24 @@ fn rescan_watch_roots(
         return Ok(());
     }
     emit_queue(app, project_id, &queue);
+    schedule_code_wiki_sync(root, &queue.tasks);
     Ok(())
+}
+
+fn schedule_code_wiki_sync(root: &Path, tasks: &[FileChangeTask]) {
+    let paths: Vec<String> = tasks.iter().map(|t| t.path.clone()).collect();
+    let repos = crate::commands::code_wiki::affected_repos(&paths);
+    if repos.is_empty() {
+        return;
+    }
+    for repo in repos {
+        let root = root.to_path_buf();
+        std::thread::spawn(move || {
+            if let Err(err) = crate::commands::code_wiki::run_sync_inner(&root, &repo) {
+                eprintln!("[code-wiki] sync failed for {}: {}", repo, err);
+            }
+        });
+    }
 }
 
 fn is_active_watcher_generation(generation: u64) -> bool {
