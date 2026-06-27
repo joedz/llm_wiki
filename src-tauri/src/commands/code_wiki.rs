@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
+use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 
 pub const WIKI_CODE_WIKI_DIR: &str = "wiki/code_wiki";
@@ -13,8 +15,16 @@ pub fn repo_root(project_path: &Path, repo_name: &str) -> PathBuf {
     project_path.join(WIKI_CODE_WIKI_DIR).join(repo_name)
 }
 
+/// codegraph's own DB lives next to the source files it indexed, in
+/// `raw/code/<repo>/.codegraph/`. We don't try to relocate it: the tool
+/// requires this layout (no `--db-path` flag in 0.9.x), and the hidden
+/// `.codegraph/` keeps the user's source tree clean in practice.
 pub fn codegraph_dir_for(project_path: &Path, repo_name: &str) -> PathBuf {
-    repo_root(project_path, repo_name).join(CODEGRAPH_DIR_NAME)
+    project_path
+        .join("raw")
+        .join("code")
+        .join(repo_name)
+        .join(CODEGRAPH_DIR_NAME)
 }
 
 pub fn graph_path_for(project_path: &Path, repo_name: &str) -> PathBuf {
@@ -69,42 +79,45 @@ pub struct CodeWikiInstallStatus {
     pub message: String,
 }
 
+/// Resolve the absolute path to the `codegraph` executable on this machine.
+/// Uses the `which` crate so nvm4w / `.npm-global` installs (which the Rust
+/// `Command::new("codegraph")` PATH lookup often misses on Windows) work too.
+fn resolve_codegraph_bin() -> Option<PathBuf> {
+    which::which("codegraph").ok()
+}
+
 fn detect_codegraph() -> CodeWikiInstallStatus {
-    match std::process::Command::new("codegraph").arg("--version").output() {
-        Ok(out) if out.status.success() => {
-            let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            CodeWikiInstallStatus {
-                installed: true,
-                version: Some(version.clone()),
-                path: which_codegraph(),
-                message: format!("codegraph {} available", version),
+    match resolve_codegraph_bin() {
+        Some(bin) => match Command::new(&bin).arg("--version").output() {
+            Ok(out) if out.status.success() => {
+                let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                CodeWikiInstallStatus {
+                    installed: true,
+                    version: Some(version.clone()),
+                    path: Some(bin.to_string_lossy().to_string()),
+                    message: format!("codegraph {} available", version),
+                }
             }
-        }
-        _ => CodeWikiInstallStatus {
+            Ok(_) => CodeWikiInstallStatus {
+                installed: false,
+                version: None,
+                path: Some(bin.to_string_lossy().to_string()),
+                message: "codegraph binary found but --version failed".to_string(),
+            },
+            Err(err) => CodeWikiInstallStatus {
+                installed: false,
+                version: None,
+                path: Some(bin.to_string_lossy().to_string()),
+                message: format!("codegraph binary at {:?} not executable: {}", bin, err),
+            },
+        },
+        None => CodeWikiInstallStatus {
             installed: false,
             version: None,
-            path: which_codegraph(),
+            path: None,
             message: "codegraph CLI not found on PATH".to_string(),
         },
     }
-}
-
-fn which_codegraph() -> Option<String> {
-    let cmd = if cfg!(windows) { "where" } else { "which" };
-    std::process::Command::new(cmd)
-        .arg("codegraph")
-        .output()
-        .ok()
-        .and_then(|out| {
-            if out.status.success() {
-                String::from_utf8_lossy(&out.stdout)
-                    .lines()
-                    .next()
-                    .map(|s| s.trim().to_string())
-            } else {
-                None
-            }
-        })
 }
 
 #[tauri::command]
@@ -179,34 +192,44 @@ pub async fn code_wiki_get_graph(
 pub struct IndexInvocationPlan {
     pub repo_root: PathBuf,
     pub codegraph_dir: PathBuf,
+    pub codegraph_db: PathBuf,
 }
 
 pub fn plan_index_invocation(project_path: &Path, repo_name: &str) -> IndexInvocationPlan {
     let repo_root = project_path.join("raw").join("code").join(repo_name);
     let codegraph_dir = codegraph_dir_for(project_path, repo_name);
-    IndexInvocationPlan { repo_root, codegraph_dir }
+    let codegraph_db = codegraph_dir.join("codegraph.db");
+    IndexInvocationPlan {
+        repo_root,
+        codegraph_dir,
+        codegraph_db,
+    }
+}
+
+/// Run a `codegraph` subcommand. Resolves the binary via `which` (so nvm4w-style
+/// installs work) and surfaces a clean error when the CLI is missing.
+fn run_codegraph(args: &[&str], repo_root: &Path) -> Result<std::process::ExitStatus, String> {
+    let bin = resolve_codegraph_bin()
+        .ok_or_else(|| "codegraph CLI not found on PATH (try `npm i -g @colbymchenry/codegraph`)".to_string())?;
+    let mut cmd = Command::new(&bin);
+    cmd.args(args);
+    cmd.arg(repo_root);
+    cmd.status()
+        .map_err(|e| format!("spawn {:?}: {}", bin, e))
 }
 
 pub fn run_indexer_inner(project_path: &Path, repo_name: &str) -> Result<(), String> {
     let plan = plan_index_invocation(project_path, repo_name);
     fs::create_dir_all(&plan.codegraph_dir)
         .map_err(|e| format!("mkdir codegraph dir: {}", e))?;
-    let init_status = std::process::Command::new("codegraph")
-        .arg("init")
-        .arg(&plan.repo_root)
-        .status()
-        .map_err(|e| format!("spawn codegraph init: {}", e))?;
+    let init_status = run_codegraph(&["init"], &plan.repo_root)?;
     if !init_status.success() {
         return Err(format!(
             "codegraph init exited with {:?}",
             init_status.code()
         ));
     }
-    let index_status = std::process::Command::new("codegraph")
-        .arg("index")
-        .arg(&plan.repo_root)
-        .status()
-        .map_err(|e| format!("spawn codegraph index: {}", e))?;
+    let index_status = run_codegraph(&["index"], &plan.repo_root)?;
     if !index_status.success() {
         return Err(format!(
             "codegraph index exited with {:?}",
@@ -230,11 +253,7 @@ pub fn run_sync_inner(project_path: &Path, repo_name: &str) -> Result<(), String
     if !plan.repo_root.exists() {
         return Err(format!("repo path {:?} no longer exists", plan.repo_root));
     }
-    let status = std::process::Command::new("codegraph")
-        .arg("sync")
-        .arg(&plan.repo_root)
-        .status()
-        .map_err(|e| format!("spawn codegraph sync: {}", e))?;
+    let status = run_codegraph(&["sync"], &plan.repo_root)?;
     if !status.success() {
         return Err(format!("codegraph sync exited with {:?}", status.code()));
     }
@@ -259,6 +278,13 @@ pub fn affected_repos(changes: &[String]) -> Vec<String> {
     set.into_iter().collect()
 }
 
+// --- codegraph DB → CodegraphContextPayload ---------------------------------
+//
+// codegraph 0.9.x doesn't expose a "context" subcommand, so we read the SQLite
+// store at `.codegraph/codegraph.db` directly. The schema we care about is the
+// `nodes` and `edges` tables; everything else is metadata we re-derive (language
+// tally, project path, etc.) from the same DB.
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CodegraphContextNode {
     pub id: String,
@@ -267,23 +293,35 @@ pub struct CodegraphContextNode {
     pub name: String,
     #[serde(rename = "filePath")]
     pub file_path: String,
+    #[serde(default, rename = "qualifiedName")]
+    pub qualified_name: Option<String>,
     #[serde(default)]
-    pub tags: Vec<String>,
-    #[serde(default)]
-    pub complexity: Option<String>,
+    pub language: Option<String>,
     #[serde(default)]
     pub summary: Option<String>,
     #[serde(default)]
-    pub location: Option<NodeLocation>,
-    #[serde(default)]
     pub signature: Option<String>,
     #[serde(default)]
-    pub content: Option<String>,
+    pub docstring: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub location: Option<NodeLocation>,
+    #[serde(default, rename = "isExported")]
+    pub is_exported: Option<bool>,
+    #[serde(default, rename = "isAsync")]
+    pub is_async: Option<bool>,
+    #[serde(default)]
+    pub decorators: Vec<String>,
+    #[serde(default)]
+    pub visibility: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NodeLocation {
+    #[serde(rename = "startLine")]
     pub start_line: u32,
+    #[serde(rename = "endLine")]
     pub end_line: u32,
 }
 
@@ -301,12 +339,122 @@ pub struct CodegraphContextEdge {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CodegraphContextPayload {
+    #[serde(default, rename = "projectPath")]
+    pub project_path: Option<String>,
     #[serde(default)]
     pub languages: Vec<String>,
-    #[serde(default)]
+    #[serde(default, rename = "gitCommitHash")]
     pub git_commit_hash: Option<String>,
     pub nodes: Vec<CodegraphContextNode>,
     pub edges: Vec<CodegraphContextEdge>,
+}
+
+fn read_db_payload(db_path: &Path) -> Result<CodegraphContextPayload, String> {
+    if !db_path.exists() {
+        return Err(format!("codegraph DB not found at {:?}", db_path));
+    }
+    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| format!("open codegraph DB: {}", e))?;
+
+    let project_path: Option<String> = conn
+        .query_row(
+            "SELECT value FROM project_metadata WHERE key = 'projectPath'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+
+    let mut lang_stmt = conn
+        .prepare("SELECT DISTINCT language FROM nodes WHERE language <> '' ORDER BY language")
+        .map_err(|e| format!("prepare languages: {}", e))?;
+    let languages: Vec<String> = lang_stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("query languages: {}", e))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let git_commit_hash: Option<String> = conn
+        .query_row(
+            "SELECT value FROM project_metadata WHERE key IN ('gitCommitHash','git_commit_hash')",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+
+    let mut node_stmt = conn
+        .prepare(
+            "SELECT id, kind, name, qualified_name, file_path, language,
+                    docstring, signature, visibility, is_exported, is_async,
+                    decorators, start_line, end_line
+             FROM nodes",
+        )
+        .map_err(|e| format!("prepare nodes: {}", e))?;
+    let nodes: Vec<CodegraphContextNode> = node_stmt
+        .query_map([], row_to_node)
+        .map_err(|e| format!("query nodes: {}", e))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut edge_stmt = conn
+        .prepare("SELECT source, target, kind, metadata FROM edges")
+        .map_err(|e| format!("prepare edges: {}", e))?;
+    let edges: Vec<CodegraphContextEdge> = edge_stmt
+        .query_map([], row_to_edge)
+        .map_err(|e| format!("query edges: {}", e))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(CodegraphContextPayload {
+        project_path,
+        languages,
+        git_commit_hash,
+        nodes,
+        edges,
+    })
+}
+
+fn row_to_node(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodegraphContextNode> {
+    let decorators_json: Option<String> = row.get(11)?;
+    let decorators: Vec<String> = decorators_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    let start_line: i64 = row.get(12)?;
+    let end_line: i64 = row.get(13)?;
+    Ok(CodegraphContextNode {
+        id: row.get(0)?,
+        kind: row.get(1)?,
+        name: row.get(2)?,
+        qualified_name: row.get(3)?,
+        file_path: row.get(4)?,
+        language: row.get(5)?,
+        docstring: row.get(6)?,
+        signature: row.get(7)?,
+        visibility: row.get(8)?,
+        is_exported: row.get::<_, Option<i64>>(9)?.map(|v| v != 0),
+        is_async: row.get::<_, Option<i64>>(10)?.map(|v| v != 0),
+        decorators,
+        summary: row.get(6)?,    // alias docstring → summary for the exporter
+        location: Some(NodeLocation {
+            start_line: start_line.max(0) as u32,
+            end_line: end_line.max(0) as u32,
+        }),
+        tags: Vec::new(),
+    })
+}
+
+fn row_to_edge(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodegraphContextEdge> {
+    let metadata_json: Option<String> = row.get(3)?;
+    let metadata = metadata_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok());
+    Ok(CodegraphContextEdge {
+        source: row.get(0)?,
+        target: row.get(1)?,
+        kind: row.get(2)?,
+        weight: None,
+        metadata,
+    })
 }
 
 pub fn run_get_graph_payload_inner(
@@ -317,21 +465,7 @@ pub fn run_get_graph_payload_inner(
     if !plan.repo_root.exists() {
         return Err(format!("repo path {:?} does not exist", plan.repo_root));
     }
-    let output = std::process::Command::new("codegraph")
-        .arg("context")
-        .arg("--format")
-        .arg("json")
-        .arg(&plan.repo_root)
-        .output()
-        .map_err(|e| format!("spawn codegraph context: {}", e))?;
-    if !output.status.success() {
-        return Err(format!(
-            "codegraph context exited with {:?}: {}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    serde_json::from_slice(&output.stdout).map_err(|e| format!("parse codegraph context: {}", e))
+    read_db_payload(&plan.codegraph_db)
 }
 
 #[tauri::command]

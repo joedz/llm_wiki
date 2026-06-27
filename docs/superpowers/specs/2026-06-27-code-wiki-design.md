@@ -22,8 +22,11 @@ project_root/
 ├── raw/
 │   └── code/                       # Top-level subdirs are independent repos
 │       ├── repo-A/
+│       │   ├── .codegraph/         # codegraph tool's local DB (hidden)
+│       │   │   └── codegraph.db
 │       │   └── (user code)
 │       └── repo-B/
+│           ├── .codegraph/
 │           └── (user code)
 └── wiki/
     ├── ...existing wiki content
@@ -31,14 +34,12 @@ project_root/
         ├── index.json             # Global index of all repos
         ├── repo-A/
         │   ├── graph.json         # Per-repo knowledge graph
-        │   ├── meta.json          # Last-analyzed metadata
-        │   └── .codegraph/        # codegraph tool's local DB
-        │       └── codegraph.db
+        │   └── meta.json          # Last-analyzed metadata
         └── repo-B/
             └── ...
 ```
 
-The `.codegraph/` directory is co-located with the graph.json it produced, so removing a repo also drops its index. Storing it under `wiki/code_wiki/` (not `raw/code/`) keeps the user's source tree free of tool artifacts.
+**Layout note:** `codegraph init <path>` (CLI 0.9.x) always writes its SQLite DB to `<path>/.codegraph/`. There is no flag to override this in the current version, so the DB lives next to the source files it indexed. The hidden `.codegraph/` keeps the user's tree visually clean. We only own the derived `graph.json` + `meta.json` under `wiki/code_wiki/<repo>/`; the DB is a codegraph-managed artifact that we read but never write to. Deleting a repo drops both the source tree and its DB.
 
 ## Data Model
 

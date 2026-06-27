@@ -1,6 +1,7 @@
 import { fileExists, readFile, writeFile, createDirectory } from "@/commands/fs"
 import {
   CODEGRAPH_DIR,
+  RAW_CODE_ROOT,
   WIKI_CODE_ROOT,
   type CodeGraph,
   type CodeWikiIndex,
@@ -25,8 +26,12 @@ export function indexPathFor(projectPath: string): string {
   return `${projectPath}/${WIKI_CODE_ROOT}/index.json`
 }
 
+/// Where codegraph 0.9.x writes its SQLite DB for a given repo. codegraph
+/// always uses `<repo_path>/.codegraph/` (no flag to override), so for an
+/// imported repo under `raw/code/<repo>/` the DB lives there too. Hidden
+/// directory, so it doesn't pollute the user's source tree in practice.
 export function codegraphDirFor(projectPath: string, repoName: string): string {
-  return `${repoRootFor(projectPath, repoName)}/${CODEGRAPH_ROOT_DIR}`
+  return `${projectPath}/${RAW_CODE_ROOT}/${repoName}/${CODEGRAPH_ROOT_DIR}`
 }
 
 async function ensureParent(path: string): Promise<void> {

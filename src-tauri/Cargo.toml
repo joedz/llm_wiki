@@ -62,6 +62,10 @@ sha2 = "0.10"
 md-5 = "0.10"
 notify = "8"
 walkdir = "2"
+# Code Wiki: read codegraph's .codegraph/codegraph.db (sqlite) directly so we
+# don't need a 'context' subcommand on the codegraph CLI. The 'bundled' feature
+# ships a private libsqlite so we don't depend on the host having one.
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

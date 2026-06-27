@@ -18,10 +18,12 @@ fn temp_root(label: &str) -> PathBuf {
 }
 
 #[test]
-fn codegraph_dir_for_lives_inside_wiki_code_wiki() {
+fn codegraph_dir_for_lives_next_to_source() {
+    // codegraph 0.9.x always writes its DB to `<path>/.codegraph/`, so
+    // for an imported repo at raw/code/<repo> the DB lives there too.
     let project = temp_root("path");
     let dir = codegraph_dir_for(&project, "repo-A");
-    assert!(dir.ends_with("wiki/code_wiki/repo-A/.codegraph"));
+    assert!(dir.ends_with("raw/code/repo-A/.codegraph"));
     let _ = fs::remove_dir_all(&project);
 }
 
@@ -87,4 +89,62 @@ fn parse_codegraph_context_json_to_payload_keeps_required_fields() {
     let payload: CodegraphContextPayload = serde_json::from_slice(raw).unwrap();
     assert_eq!(payload.languages, vec!["typescript".to_string()]);
     assert_eq!(payload.nodes.len(), 1);
+}
+
+#[test]
+fn read_db_payload_reads_real_codegraph_db() {
+    // Build a real codegraph DB in a temp dir to exercise the rusqlite path.
+    let project = temp_root("real-db");
+    let repo = project.join("raw").join("code").join("gglog");
+    let src = repo.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("lib.rs"), "pub fn add(a: i32, b: i32) -> i32 { a + b }\n").unwrap();
+
+    let bin = match which::which("codegraph") {
+        Ok(b) => b,
+        Err(_) => {
+            // codegraph CLI not installed in this environment — skip the
+            // e2e half; the unit tests above already cover the parse path.
+            eprintln!("codegraph not on PATH; skipping read_db_payload integration test");
+            let _ = fs::remove_dir_all(&project);
+            return;
+        }
+    };
+
+    let init_status = std::process::Command::new(&bin)
+        .arg("init")
+        .arg(&repo)
+        .status()
+        .expect("spawn codegraph init");
+    assert!(init_status.success(), "codegraph init failed: {:?}", init_status);
+    let index_status = std::process::Command::new(&bin)
+        .arg("index")
+        .arg(&repo)
+        .status()
+        .expect("spawn codegraph index");
+    assert!(index_status.success(), "codegraph index failed: {:?}", index_status);
+
+    let plan = plan_index_invocation(&project, "gglog");
+    assert!(plan.codegraph_db.exists(), "codegraph DB not created");
+
+    let payload = run_get_graph_payload_inner(&project, "gglog").expect("read payload");
+    assert!(
+        !payload.nodes.is_empty(),
+        "expected nodes from real codegraph DB, got 0"
+    );
+    // The Rust function in lib.rs should be present
+    let has_add = payload
+        .nodes
+        .iter()
+        .any(|n| n.kind == "function" && n.name == "add");
+    assert!(has_add, "function 'add' missing from real DB payload");
+
+    // JSON shape must match what the TS exporter expects
+    let json = serde_json::to_string(&payload).expect("serialize");
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
+    let first = parsed["nodes"][0].as_object().expect("node object");
+    assert!(first.contains_key("filePath"), "missing filePath: {}", json);
+    assert!(first.contains_key("type"), "missing type: {}", json);
+
+    let _ = fs::remove_dir_all(&project);
 }
