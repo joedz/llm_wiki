@@ -9,3 +9,5 @@ export {
   type GraphNode,
   type RepoSummary,
 } from "./types"
+
+export { readGraph, writeGraph, readIndex, writeIndex, readMeta, writeMeta, graphPathFor, repoRootFor, metaPathFor, indexPathFor, codegraphDirFor } from "./wiki-storage"
