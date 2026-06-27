@@ -34,3 +34,23 @@ fn is_code_wiki_public_path_accepts_graph_meta_index() {
     ));
     assert!(!is_code_wiki_public_path("wiki/index.md"));
 }
+
+#[test]
+fn list_repos_returns_top_level_subdirs() {
+    let project = temp_root("list");
+    let code_root = project.join("raw").join("code");
+    fs::create_dir_all(code_root.join("repo-A")).unwrap();
+    fs::create_dir_all(code_root.join("repo-B")).unwrap();
+    fs::create_dir_all(code_root.join(".cache")).unwrap();
+    let names = list_repo_names(&project).unwrap();
+    assert_eq!(names, vec!["repo-A".to_string(), "repo-B".to_string()]);
+    let _ = fs::remove_dir_all(&project);
+}
+
+#[test]
+fn read_index_returns_empty_when_missing() {
+    let project = temp_root("empty-index");
+    let index = read_or_empty_index(&project).unwrap();
+    assert!(index.repos.is_empty());
+    let _ = fs::remove_dir_all(&project);
+}

@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -109,6 +110,69 @@ fn which_codegraph() -> Option<String> {
 #[tauri::command]
 pub async fn code_wiki_install_check() -> Result<CodeWikiInstallStatus, String> {
     Ok(detect_codegraph())
+}
+
+pub fn list_repo_names(project_path: &Path) -> Result<Vec<String>, String> {
+    let code_root = project_path.join("raw").join("code");
+    let entries = match fs::read_dir(&code_root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("read_dir({:?}): {}", code_root, e)),
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .filter(|n| !n.starts_with('.') && n != "node_modules")
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
+pub fn read_or_empty_index(project_path: &Path) -> Result<CodeWikiIndex, String> {
+    let path = index_path_for(project_path);
+    match fs::read_to_string(&path) {
+        Ok(raw) => serde_json::from_str(&raw).map_err(|e| format!("parse index: {}", e)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(CodeWikiIndex {
+            version: "1.0.0".to_string(),
+            generated_at: String::new(),
+            repos: Vec::new(),
+        }),
+        Err(e) => Err(format!("read index: {}", e)),
+    }
+}
+
+#[tauri::command]
+pub async fn code_wiki_list_repos(project_path: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || list_repo_names(Path::new(&project_path)))
+        .await
+        .map_err(|e| format!("join error: {}", e))?
+}
+
+#[tauri::command]
+pub async fn code_wiki_get_index(project_path: String) -> Result<CodeWikiIndex, String> {
+    tauri::async_runtime::spawn_blocking(move || read_or_empty_index(Path::new(&project_path)))
+        .await
+        .map_err(|e| format!("join error: {}", e))?
+}
+
+#[tauri::command]
+pub async fn code_wiki_get_graph(
+    project_path: String,
+    repo_name: String,
+) -> Result<Option<serde_json::Value>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = graph_path_for(Path::new(&project_path), &repo_name);
+        match fs::read_to_string(&path) {
+            Ok(raw) => {
+                serde_json::from_str(&raw).map(Some).map_err(|e| format!("parse graph: {}", e))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("read graph: {}", e)),
+        }
+    })
+    .await
+    .map_err(|e| format!("join error: {}", e))?
 }
 
 #[cfg(test)]
