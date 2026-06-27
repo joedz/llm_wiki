@@ -17,3 +17,4 @@ export { readGraph, writeGraph, readIndex, writeIndex, readMeta, writeMeta, grap
 export { detectRepos } from "./repo-detector"
 export { buildIndex } from "./index-builder"
 export { queryGraph, type GraphQueryInput, type GraphQueryResult } from "./graph-query"
+export { exportGraph, type CodegraphPayload, type ExportInput } from "./graph-exporter"
