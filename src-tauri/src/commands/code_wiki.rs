@@ -259,6 +259,93 @@ pub fn affected_repos(changes: &[String]) -> Vec<String> {
     set.into_iter().collect()
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CodegraphContextNode {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub name: String,
+    #[serde(rename = "filePath")]
+    pub file_path: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub complexity: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub location: Option<NodeLocation>,
+    #[serde(default)]
+    pub signature: Option<String>,
+    #[serde(default)]
+    pub content: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct NodeLocation {
+    pub start_line: u32,
+    pub end_line: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CodegraphContextEdge {
+    pub source: String,
+    pub target: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub weight: Option<f32>,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CodegraphContextPayload {
+    #[serde(default)]
+    pub languages: Vec<String>,
+    #[serde(default)]
+    pub git_commit_hash: Option<String>,
+    pub nodes: Vec<CodegraphContextNode>,
+    pub edges: Vec<CodegraphContextEdge>,
+}
+
+pub fn run_get_graph_payload_inner(
+    project_path: &Path,
+    repo_name: &str,
+) -> Result<CodegraphContextPayload, String> {
+    let plan = plan_index_invocation(project_path, repo_name);
+    if !plan.repo_root.exists() {
+        return Err(format!("repo path {:?} does not exist", plan.repo_root));
+    }
+    let output = std::process::Command::new("codegraph")
+        .arg("context")
+        .arg("--format")
+        .arg("json")
+        .arg(&plan.repo_root)
+        .output()
+        .map_err(|e| format!("spawn codegraph context: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "codegraph context exited with {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    serde_json::from_slice(&output.stdout).map_err(|e| format!("parse codegraph context: {}", e))
+}
+
+#[tauri::command]
+pub async fn code_wiki_get_graph_payload(
+    project_path: String,
+    repo_name: String,
+) -> Result<CodegraphContextPayload, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        run_get_graph_payload_inner(Path::new(&project_path), &repo_name)
+    })
+    .await
+    .map_err(|e| format!("join error: {}", e))?
+}
+
 #[cfg(test)]
 #[path = "code_wiki_tests.rs"]
 mod tests;

@@ -76,3 +76,15 @@ fn affected_repos_from_changes_extracts_top_level_subdirs() {
     let repos = affected_repos(&changes);
     assert_eq!(repos, vec!["repo-A".to_string(), "repo-B".to_string()]);
 }
+
+#[test]
+fn parse_codegraph_context_json_to_payload_keeps_required_fields() {
+    let raw = br#"{
+      "languages": ["typescript"],
+      "nodes": [{"id": "file:src/a.ts", "type": "file", "name": "a.ts", "filePath": "src/a.ts", "tags": []}],
+      "edges": []
+    }"#;
+    let payload: CodegraphContextPayload = serde_json::from_slice(raw).unwrap();
+    assert_eq!(payload.languages, vec!["typescript".to_string()]);
+    assert_eq!(payload.nodes.len(), 1);
+}
