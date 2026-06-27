@@ -240,3 +240,28 @@ Target performance: 1000 nodes / 5000 edges in < 50ms, 5 repos in parallel in < 
 - **Architecture layers** — auto-classify files into layers (frontend, backend, infra) and emit `layers[]`
 - **Human-readable code wiki pages** — generate markdown overviews per file/symbol under `wiki/code_wiki/<repo>/pages/`
 - **Cross-repo edges** — detect when one repo imports from another and emit edges in the global index
+
+## Implementation Status (2026-06-27)
+
+All 18 tasks from the implementation plan are complete. The feature is end-to-end functional:
+
+- `src/lib/code-wiki/` (TypeScript): types, storage, repo detection, index builder, in-memory graph query, exporter, graph builder
+- `src-tauri/src/commands/code_wiki.rs` + tests: 7 Rust commands (`code_wiki_install_check`, `code_wiki_list_repos`, `code_wiki_get_index`, `code_wiki_get_graph`, `code_wiki_get_graph_payload`, `code_wiki_run_indexer`, `code_wiki_run_sync`)
+- Chat pipeline: `buildCodeWikiOrFallbackContext` prefers graph-backed code context; falls back to live scan when the index is missing
+- File sync: `schedule_code_wiki_sync` debounces `codegraph sync` per affected repo on changes under `raw/code/<repo>/`
+- Source-lifecycle: `triggerCodeWikiBuilds` runs after code import
+- UI: "Build code graph" button in the sources view
+
+**Verification:**
+- 18 TypeScript tests pass (vitest) covering types, storage, repo detection, index builder, graph query, and graph exporter
+- 7 Rust tests pass (cargo test) covering path helpers, public-path predicate, list/index, plan_index, and codegraph payload parsing
+- Full TypeScript type check (`tsc --noEmit`) passes with no errors
+- Rust `cargo build --lib` succeeds
+
+**Deferred work (out of scope, future phases):**
+- React Flow visualization panel
+- Architecture layer classification
+- Human-readable code wiki pages
+- Cross-repo edges in the global index
+- Per-repo sync debouncing (currently each affected repo triggers an immediate sync; codegraph itself dedupes internally)
+
