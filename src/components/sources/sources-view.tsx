@@ -50,6 +50,7 @@ export function SourcesView() {
    *      anchored here is the right scope.
    */
   const [pendingDeletePath, setPendingDeletePath] = useState<string | null>(null)
+  const [buildingGraph, setBuildingGraph] = useState(false)
 
   // Auto-disarm: 5 seconds without a second click resets the
   // pending state. Prevents a stale armed button from firing if
@@ -82,6 +83,24 @@ export function SourcesView() {
   useEffect(() => {
     loadSources()
   }, [loadSources, dataVersion])
+
+  async function handleBuildCodeGraph() {
+    if (!project || buildingGraph) return
+    setBuildingGraph(true)
+    try {
+      const { detectRepos, buildGraphForRepo } = await import("@/lib/code-wiki")
+      const repos = await detectRepos(project.path)
+      for (const repo of repos) {
+        try {
+          await buildGraphForRepo(project.path, repo)
+        } catch (err) {
+          console.warn(`[sources] code-wiki build for ${repo} failed:`, err)
+        }
+      }
+    } finally {
+      setBuildingGraph(false)
+    }
+  }
 
   async function handleRefreshSources() {
     if (!project || refreshing) return
@@ -292,6 +311,15 @@ export function SourcesView() {
           <Button size="sm" onClick={handleImportFolder} disabled={importing}>
             <Plus className="mr-1 h-4 w-4" />
             {t("sources.importFolder", "Folder")}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={handleBuildCodeGraph}
+            disabled={buildingGraph}
+            title={t("sources.buildGraphTooltip", "Build or refresh the code knowledge graph for every imported repository")}
+          >
+            {buildingGraph ? t("sources.buildingGraph", "Building graph...") : t("sources.buildGraph", "Build code graph")}
           </Button>
         </div>
       </div>
