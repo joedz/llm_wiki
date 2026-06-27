@@ -180,6 +180,8 @@ export async function importSourceFiles(
     llmConfig,
   )
 
+  void triggerCodeWikiBuilds(project.path, importedPaths, pp)
+
   return importedPaths
 }
 
@@ -230,6 +232,8 @@ export async function importSourceFolder(
       rootContext: folderName,
     })
   }
+
+  void triggerCodeWikiBuilds(project.path, allowedFiles, pp)
 
   return allowedFiles
 }
@@ -529,4 +533,32 @@ function withRootContext(context: string, rootContext?: string): string {
   if (!rootContext) return context
   if (!context) return rootContext
   return `${rootContext} > ${context}`
+}
+
+function triggerCodeWikiBuilds(
+  projectPath: string,
+  importedPaths: string[],
+  projectPathNormalized: string,
+): void {
+  const touchedRepos = new Set<string>()
+  for (const p of importedPaths) {
+    if (isCodeSourcePathWithinProject(projectPathNormalized, p)) {
+      const rel = p
+        .replace(/\\/g, "/")
+        .slice(`${projectPathNormalized}/${RAW_CODE_ROOT}/`.length)
+      const top = rel.split("/")[0]
+      if (top) touchedRepos.add(top)
+    }
+  }
+  if (touchedRepos.size === 0) return
+  void (async () => {
+    const { buildGraphForRepo } = await import("@/lib/code-wiki")
+    for (const repo of touchedRepos) {
+      try {
+        await buildGraphForRepo(projectPath, repo)
+      } catch (err) {
+        console.warn(`[code-wiki] build for ${repo} failed:`, err)
+      }
+    }
+  })()
 }
