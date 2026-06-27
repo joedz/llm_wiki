@@ -87,3 +87,30 @@ export interface CodeWikiMeta {
   indexerVersion: string
   sourceFileCount: number
 }
+
+export interface CodeSnippet {
+  filePath: string
+  symbolName: string
+  language: string
+  content: string
+  startLine: number
+  endLine: number
+  reason: string
+}
+
+export interface CodeRelationship {
+  type: "calls" | "imports" | "contains" | "extends" | "implements"
+  source: string
+  target: string
+  sourcePath: string
+  targetPath: string
+  line: number
+}
+
+export interface CodeReference {
+  title: string
+  path: string
+  kind: "code"
+  source?: string
+  snippet?: string
+}

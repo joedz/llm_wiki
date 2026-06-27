@@ -3,6 +3,9 @@ export {
   WIKI_CODE_ROOT,
   CODEGRAPH_DIR,
   type CodeGraph,
+  type CodeReference,
+  type CodeRelationship,
+  type CodeSnippet,
   type CodeWikiIndex,
   type CodeWikiMeta,
   type GraphEdge,
@@ -13,3 +16,4 @@ export {
 export { readGraph, writeGraph, readIndex, writeIndex, readMeta, writeMeta, graphPathFor, repoRootFor, metaPathFor, indexPathFor, codegraphDirFor } from "./wiki-storage"
 export { detectRepos } from "./repo-detector"
 export { buildIndex } from "./index-builder"
+export { queryGraph, type GraphQueryInput, type GraphQueryResult } from "./graph-query"
