@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react"
 import { open } from "@tauri-apps/plugin-dialog"
-import { Plus, FileText, RefreshCw, BookOpen, Trash2, Folder, ChevronRight, ChevronDown } from "lucide-react"
+import { Plus, FileText, RefreshCw, BookOpen, Trash2, Folder, ChevronRight, ChevronDown, Code2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
@@ -50,7 +50,6 @@ export function SourcesView() {
    *      anchored here is the right scope.
    */
   const [pendingDeletePath, setPendingDeletePath] = useState<string | null>(null)
-  const [buildingGraph, setBuildingGraph] = useState(false)
 
   // Auto-disarm: 5 seconds without a second click resets the
   // pending state. Prevents a stale armed button from firing if
@@ -85,21 +84,13 @@ export function SourcesView() {
   }, [loadSources, dataVersion])
 
   async function handleBuildCodeGraph() {
-    if (!project || buildingGraph) return
-    setBuildingGraph(true)
-    try {
-      const { detectRepos, buildGraphForRepo } = await import("@/lib/code-wiki")
-      const repos = await detectRepos(project.path)
-      for (const repo of repos) {
-        try {
-          await buildGraphForRepo(project.path, repo)
-        } catch (err) {
-          console.warn(`[sources] code-wiki build for ${repo} failed:`, err)
-        }
-      }
-    } finally {
-      setBuildingGraph(false)
-    }
+    // The "Build code graph" button moved to the new CodeWikiView page,
+    // where per-repo state (last build, dashboard URL, build errors) is
+    // surfaced alongside the action. The button here was a hidden
+    // re-entry point that built every repo on every click — easy to
+    // hit by accident and hard to know what failed. If the user opens
+    // the CodeWikiView for the first time, the empty state calls
+    // detectRepos() + buildGraphForRepo() for any unbuilt repos.
   }
 
   async function handleRefreshSources() {
@@ -315,11 +306,11 @@ export function SourcesView() {
           <Button
             size="sm"
             variant="outline"
-            onClick={handleBuildCodeGraph}
-            disabled={buildingGraph}
-            title={t("sources.buildGraphTooltip", "Build or refresh the code knowledge graph for every imported repository")}
+            onClick={() => useWikiStore.getState().setActiveView("codeWiki")}
+            title={t("sources.openCodeWikiTooltip", "Open the Code Wiki view to build graphs and dashboards")}
           >
-            {buildingGraph ? t("sources.buildingGraph", "Building graph...") : t("sources.buildGraph", "Build code graph")}
+            <Code2 className="mr-1 h-4 w-4" />
+            {t("sources.openCodeWiki", "Code Wiki")}
           </Button>
         </div>
       </div>

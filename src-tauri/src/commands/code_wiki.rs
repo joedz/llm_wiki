@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 pub const WIKI_CODE_WIKI_DIR: &str = "wiki/code_wiki";
 pub const CODEGRAPH_DIR_NAME: &str = ".codegraph";
 pub const INDEX_FILE: &str = "index.json";
-pub const GRAPH_FILE: &str = "graph.json";
+pub const GRAPH_FILE: &str = "knowledge-graph.json";
 pub const META_FILE: &str = "meta.json";
 
 pub fn repo_root(project_path: &Path, repo_name: &str) -> PathBuf {

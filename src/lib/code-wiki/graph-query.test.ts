@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest"
 import { queryGraph } from "./graph-query"
-import type { CodeGraph } from "./types"
-import sample from "./__fixtures__/sample-graph.json" assert { type: "json" }
+import type { KnowledgeGraph } from "./types"
+import sample from "./__fixtures__/sample-knowledge-graph.json" assert { type: "json" }
 
-const graph = sample as CodeGraph
+const graph = sample as KnowledgeGraph
 
 describe("queryGraph", () => {
   it("matches a symbol by exact name and includes its callers", () => {
@@ -26,8 +26,12 @@ describe("queryGraph", () => {
   })
 
   it("respects the context budget", () => {
-    const result = queryGraph({ graph, message: "alpha", hops: 1, maxContextSize: 60 })
+    // Summaries in the fixture are ~20-25 chars; with hops=1 we get
+    // alpha + (callers beta, gamma) for ~75 chars total. A 30-char
+    // budget means we can't fit all three, so the result must be
+    // capped.
+    const result = queryGraph({ graph, message: "alpha", hops: 1, maxContextSize: 30 })
     const total = result.snippets.reduce((sum, s) => sum + s.content.length, 0)
-    expect(total).toBeLessThanOrEqual(60)
+    expect(total).toBeLessThanOrEqual(30)
   })
 })

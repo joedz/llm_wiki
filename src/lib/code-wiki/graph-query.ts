@@ -1,9 +1,10 @@
 import type {
-  CodeGraph,
   CodeReference,
   CodeRelationship,
   CodeSnippet,
+  GraphEdge,
   GraphNode,
+  KnowledgeGraph,
 } from "./types"
 
 const STOP_WORDS = new Set([
@@ -14,7 +15,7 @@ const STOP_WORDS = new Set([
 ])
 
 export interface GraphQueryInput {
-  graph: CodeGraph
+  graph: KnowledgeGraph
   message: string
   hops?: number
   maxContextSize?: number
@@ -39,11 +40,11 @@ interface ScoredNode {
   matchKind: "symbol" | "file" | "path"
 }
 
-function scoreNodes(graph: CodeGraph, tokens: string[]): ScoredNode[] {
+function scoreNodes(graph: KnowledgeGraph, tokens: string[]): ScoredNode[] {
   const scored: ScoredNode[] = []
   for (const node of graph.nodes) {
     const lowerName = node.name.toLowerCase()
-    const lowerPath = node.filePath.toLowerCase()
+    const lowerPath = (node.filePath ?? "").toLowerCase()
     let score = 0
     let matchKind: ScoredNode["matchKind"] | null = null
     for (const token of tokens) {
@@ -53,10 +54,10 @@ function scoreNodes(graph: CodeGraph, tokens: string[]): ScoredNode[] {
       } else if (lowerName.includes(token)) {
         score += 5
         matchKind = matchKind ?? "symbol"
-      } else if (lowerPath.endsWith(`/${token}`) || lowerPath === token) {
+      } else if (lowerPath && (lowerPath.endsWith(`/${token}`) || lowerPath === token)) {
         score += 3
         matchKind = matchKind ?? "file"
-      } else if (lowerPath.includes(token)) {
+      } else if (lowerPath && lowerPath.includes(token)) {
         score += 1
         matchKind = matchKind ?? "path"
       }
@@ -69,7 +70,7 @@ function scoreNodes(graph: CodeGraph, tokens: string[]): ScoredNode[] {
   return scored
 }
 
-function buildAdjacency(graph: CodeGraph): {
+function buildAdjacency(graph: KnowledgeGraph): {
   outgoing: Map<string, string[]>
   incoming: Map<string, string[]>
 } {
@@ -84,26 +85,21 @@ function buildAdjacency(graph: CodeGraph): {
   return { outgoing, incoming }
 }
 
+/// Build a CodeSnippet for a UA graph node. UA has no `content` field —
+/// we surface the node's `summary` (or a placeholder for non-summary
+/// types) so chat can quote it directly.
 function nodeToSnippet(node: GraphNode): CodeSnippet | null {
-  if (node.type === "file") {
-    return {
-      filePath: node.filePath,
-      symbolName: node.name,
-      language: node.languageNotes ?? "unknown",
-      content: node.content ?? "",
-      startLine: node.location?.startLine ?? 0,
-      endLine: node.location?.endLine ?? 0,
-      reason: "match",
-    }
-  }
-  if (!node.content) return null
+  if (!node.filePath) return null
+  const language = node.languageNotes ?? "unknown"
+  const [startLine = 0, endLine = 0] = node.lineRange ?? []
+  const content = node.summary || `${node.type}: ${node.name}`
   return {
     filePath: node.filePath,
     symbolName: node.name,
-    language: node.languageNotes ?? "unknown",
-    content: node.content,
-    startLine: node.location?.startLine ?? 0,
-    endLine: node.location?.endLine ?? 0,
+    language,
+    content,
+    startLine,
+    endLine,
     reason: "match",
   }
 }
@@ -113,7 +109,10 @@ function trimSnippet(snippet: CodeSnippet, budget: number): CodeSnippet {
   return { ...snippet, content: snippet.content.slice(0, budget) + "\n// ...truncated" }
 }
 
-function buildRelationships(graph: CodeGraph, nodeIds: Set<string>): CodeRelationship[] {
+function buildRelationships(
+  graph: KnowledgeGraph,
+  nodeIds: Set<string>,
+): CodeRelationship[] {
   const relationships: CodeRelationship[] = []
   for (const edge of graph.edges) {
     if (!nodeIds.has(edge.source) || !nodeIds.has(edge.target)) continue
@@ -125,9 +124,9 @@ function buildRelationships(graph: CodeGraph, nodeIds: Set<string>): CodeRelatio
       type: "calls",
       source: sourceNode.name,
       target: targetNode.name,
-      sourcePath: sourceNode.filePath,
-      targetPath: targetNode.filePath,
-      line: sourceNode.location?.startLine ?? 0,
+      sourcePath: sourceNode.filePath ?? "",
+      targetPath: targetNode.filePath ?? "",
+      line: sourceNode.lineRange?.[0] ?? 0,
     })
   }
   return relationships
@@ -188,3 +187,7 @@ export function queryGraph(input: GraphQueryInput): GraphQueryResult {
   const references = buildReferences(snippets, graph.project.name)
   return { snippets, relationships, references }
 }
+
+// Re-export GraphNode/GraphEdge for call-sites that want types but no
+// runtime dependency on `./types`.
+export type { GraphEdge, GraphNode }

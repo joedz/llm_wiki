@@ -7,6 +7,7 @@ import { LintView } from "@/components/lint/lint-view"
 import { SearchView } from "@/components/search/search-view"
 import { GraphView } from "@/components/graph/graph-view"
 import { PushReviewView } from "@/components/push-review/push-review-view"
+import { CodeWikiView } from "@/components/code-wiki/code-wiki-view"
 
 export function ContentArea() {
   const activeView = useWikiStore((s) => s.activeView)
@@ -26,6 +27,8 @@ export function ContentArea() {
       return <SearchView />
     case "graph":
       return <GraphView />
+    case "codeWiki":
+      return <CodeWikiView />
     default:
       return <ChatPanel />
   }

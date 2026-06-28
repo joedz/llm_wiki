@@ -8,6 +8,7 @@
     "sources": "Sources",
     "search": "Search",
     "graph": "Graph",
+    "codeWiki": "Code Wiki",
     "lint": "Lint",
     "review": "Review",
     "pushReview": "Push Review",

@@ -3,19 +3,19 @@ import {
   CODEGRAPH_DIR,
   RAW_CODE_ROOT,
   WIKI_CODE_ROOT,
-  type CodeGraph,
+  type AnalysisMeta,
   type CodeWikiIndex,
-  type CodeWikiMeta,
+  type KnowledgeGraph,
 } from "./types"
 
-const CODEGRAPH_ROOT_DIR = CODEGRAPH_DIR
+const KNOWLEDGE_GRAPH_FILE = "knowledge-graph.json"
 
 export function repoRootFor(projectPath: string, repoName: string): string {
   return `${projectPath}/${WIKI_CODE_ROOT}/${repoName}`
 }
 
-export function graphPathFor(projectPath: string, repoName: string): string {
-  return `${repoRootFor(projectPath, repoName)}/graph.json`
+export function knowledgeGraphPathFor(projectPath: string, repoName: string): string {
+  return `${repoRootFor(projectPath, repoName)}/${KNOWLEDGE_GRAPH_FILE}`
 }
 
 export function metaPathFor(projectPath: string, repoName: string): string {
@@ -31,7 +31,7 @@ export function indexPathFor(projectPath: string): string {
 /// imported repo under `raw/code/<repo>/` the DB lives there too. Hidden
 /// directory, so it doesn't pollute the user's source tree in practice.
 export function codegraphDirFor(projectPath: string, repoName: string): string {
-  return `${projectPath}/${RAW_CODE_ROOT}/${repoName}/${CODEGRAPH_ROOT_DIR}`
+  return `${projectPath}/${RAW_CODE_ROOT}/${repoName}/${CODEGRAPH_DIR}`
 }
 
 async function ensureParent(path: string): Promise<void> {
@@ -41,33 +41,52 @@ async function ensureParent(path: string): Promise<void> {
   await createDirectory(parent)
 }
 
-export async function writeGraph(projectPath: string, repoName: string, graph: CodeGraph): Promise<void> {
-  const path = graphPathFor(projectPath, repoName)
+/** Write the canonical knowledge-graph.json (UA shape). */
+export async function writeKnowledgeGraph(
+  projectPath: string,
+  repoName: string,
+  graph: KnowledgeGraph,
+): Promise<void> {
+  const path = knowledgeGraphPathFor(projectPath, repoName)
   await ensureParent(path)
   await writeFile(path, JSON.stringify(graph, null, 2))
 }
 
-export async function readGraph(projectPath: string, repoName: string): Promise<CodeGraph | null> {
-  const path = graphPathFor(projectPath, repoName)
+/** Read the canonical knowledge-graph.json. Returns null if missing. */
+export async function readKnowledgeGraph(
+  projectPath: string,
+  repoName: string,
+): Promise<KnowledgeGraph | null> {
+  const path = knowledgeGraphPathFor(projectPath, repoName)
   if (!(await fileExists(path))) return null
   const raw = await readFile(path)
-  return JSON.parse(raw) as CodeGraph
+  return JSON.parse(raw) as KnowledgeGraph
 }
 
-export async function writeMeta(projectPath: string, repoName: string, meta: CodeWikiMeta): Promise<void> {
+export async function writeMeta(
+  projectPath: string,
+  repoName: string,
+  meta: AnalysisMeta,
+): Promise<void> {
   const path = metaPathFor(projectPath, repoName)
   await ensureParent(path)
   await writeFile(path, JSON.stringify(meta, null, 2))
 }
 
-export async function readMeta(projectPath: string, repoName: string): Promise<CodeWikiMeta | null> {
+export async function readMeta(
+  projectPath: string,
+  repoName: string,
+): Promise<AnalysisMeta | null> {
   const path = metaPathFor(projectPath, repoName)
   if (!(await fileExists(path))) return null
   const raw = await readFile(path)
-  return JSON.parse(raw) as CodeWikiMeta
+  return JSON.parse(raw) as AnalysisMeta
 }
 
-export async function writeIndex(projectPath: string, index: CodeWikiIndex): Promise<void> {
+export async function writeIndex(
+  projectPath: string,
+  index: CodeWikiIndex,
+): Promise<void> {
   const path = indexPathFor(projectPath)
   await ensureParent(path)
   await writeFile(path, JSON.stringify(index, null, 2))
@@ -75,7 +94,9 @@ export async function writeIndex(projectPath: string, index: CodeWikiIndex): Pro
 
 export async function readIndex(projectPath: string): Promise<CodeWikiIndex> {
   const path = indexPathFor(projectPath)
-  if (!(await fileExists(path))) return { version: "1.0.0", generatedAt: "", repos: [] }
+  if (!(await fileExists(path))) {
+    return { version: "1.0.0", generatedAt: "", repos: [] }
+  }
   const raw = await readFile(path)
   return JSON.parse(raw) as CodeWikiIndex
 }

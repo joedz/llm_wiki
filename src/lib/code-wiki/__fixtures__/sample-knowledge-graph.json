@@ -1,0 +1,73 @@
+{
+  "version": "1.0.0",
+  "kind": "codebase",
+  "project": {
+    "name": "sample-ts",
+    "languages": ["typescript"],
+    "frameworks": [],
+    "description": "",
+    "analyzedAt": "2026-06-27T00:00:00Z",
+    "gitCommitHash": ""
+  },
+  "nodes": [
+    {
+      "id": "file:src/a.ts",
+      "type": "file",
+      "name": "a.ts",
+      "filePath": "src/a.ts",
+      "lineRange": [0, 0],
+      "summary": "File a.ts",
+      "tags": ["source"],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:src/a.ts:alpha",
+      "type": "function",
+      "name": "alpha",
+      "filePath": "src/a.ts",
+      "lineRange": [1, 3],
+      "summary": "alpha returns one",
+      "tags": ["public"],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:src/a.ts:beta",
+      "type": "function",
+      "name": "beta",
+      "filePath": "src/a.ts",
+      "lineRange": [5, 7],
+      "summary": "beta delegates to alpha",
+      "tags": ["public"],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:src/b.ts",
+      "type": "file",
+      "name": "b.ts",
+      "filePath": "src/b.ts",
+      "lineRange": [0, 0],
+      "summary": "File b.ts",
+      "tags": ["source"],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:src/b.ts:gamma",
+      "type": "function",
+      "name": "gamma",
+      "filePath": "src/b.ts",
+      "lineRange": [1, 3],
+      "summary": "gamma calls alpha",
+      "tags": ["public"],
+      "complexity": "moderate"
+    }
+  ],
+  "edges": [
+    { "source": "file:src/a.ts", "target": "function:src/a.ts:alpha", "type": "contains", "direction": "forward", "weight": 1 },
+    { "source": "file:src/a.ts", "target": "function:src/a.ts:beta", "type": "contains", "direction": "forward", "weight": 1 },
+    { "source": "file:src/b.ts", "target": "function:src/b.ts:gamma", "type": "contains", "direction": "forward", "weight": 1 },
+    { "source": "function:src/a.ts:beta", "target": "function:src/a.ts:alpha", "type": "calls", "direction": "forward", "weight": 1 },
+    { "source": "function:src/b.ts:gamma", "target": "function:src/a.ts:alpha", "type": "calls", "direction": "forward", "weight": 1 }
+  ],
+  "layers": [],
+  "tour": []
+}

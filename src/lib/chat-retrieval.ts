@@ -6,7 +6,7 @@ import { getFileName, getRelativePath, normalizePath } from "@/lib/path-utils"
 import { searchWiki, tokenizeQuery, type SearchResult } from "@/lib/search"
 import { resolveSearchConfig, webSearch, type WebSearchResult } from "@/lib/web-search"
 import { buildCodeAnalysisContext, type CodeAnalysisContext } from "./code-analysis"
-import { readIndex as readCodeWikiIndex, readGraph as readCodeWikiGraph, queryGraph } from "@/lib/code-wiki"
+import { readIndex as readCodeWikiIndex, readKnowledgeGraph as readCodeWikiGraph, queryGraph } from "@/lib/code-wiki"
 import type { ChatRuntimeConfig } from "./chat-runtime-config"
 
 export interface ChatReference {

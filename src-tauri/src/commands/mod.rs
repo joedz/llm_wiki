@@ -1,6 +1,7 @@
 pub mod chat;
 pub mod claude_cli;
 pub mod code_wiki;
+pub mod code_wiki_dashboard;
 pub mod codex_cli;
 pub mod extract_images;
 pub mod file_sync;

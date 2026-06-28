@@ -12,18 +12,18 @@ vi.mock("@/commands/fs", () => ({
 
 import { fileExists, readFile, writeFile, createDirectory } from "@/commands/fs"
 import {
-  graphPathFor,
-  readGraph,
+  knowledgeGraphPathFor,
+  readKnowledgeGraph,
   readIndex,
   readMeta,
   repoRootFor,
-  writeGraph,
+  writeKnowledgeGraph,
   writeIndex,
   writeMeta,
   WIKI_CODE_ROOT,
-  type CodeGraph,
+  type AnalysisMeta,
   type CodeWikiIndex,
-  type CodeWikiMeta,
+  type KnowledgeGraph,
 } from "./index"
 
 let root: string
@@ -36,34 +36,61 @@ afterEach(() => {
 })
 
 describe("wiki-storage paths", () => {
-  it("graphPathFor and repoRootFor produce sibling locations", () => {
-    expect(graphPathFor(root, "repo-A")).toBe(`${root}/${WIKI_CODE_ROOT}/repo-A/graph.json`)
+  it("knowledgeGraphPathFor and repoRootFor produce sibling locations", () => {
+    expect(knowledgeGraphPathFor(root, "repo-A")).toBe(
+      `${root}/${WIKI_CODE_ROOT}/repo-A/knowledge-graph.json`,
+    )
     expect(repoRootFor(root, "repo-A")).toBe(`${root}/${WIKI_CODE_ROOT}/repo-A`)
   })
 })
 
 describe("wiki-storage round-trips", () => {
-  it("writes and reads graph.json", async () => {
-    const graph: CodeGraph = {
+  it("writes and reads knowledge-graph.json", async () => {
+    const graph: KnowledgeGraph = {
       version: "1.0.0",
-      project: { name: "repo-A", languages: ["typescript"], lastAnalyzedAt: "2026-06-27T00:00:00Z", fileCount: 1, symbolCount: 1 },
-      nodes: [{ id: "file:a.ts", type: "file", name: "a.ts", filePath: "a.ts", tags: [] }],
+      kind: "codebase",
+      project: {
+        name: "repo-A",
+        languages: ["typescript"],
+        frameworks: [],
+        description: "",
+        analyzedAt: "2026-06-27T00:00:00Z",
+        gitCommitHash: "",
+      },
+      nodes: [
+        {
+          id: "file:a.ts",
+          type: "file",
+          name: "a.ts",
+          filePath: "a.ts",
+          lineRange: [0, 0],
+          summary: "File a.ts",
+          tags: [],
+          complexity: "moderate",
+        },
+      ],
       edges: [],
-      stats: { totalNodes: 1, totalEdges: 0, byLanguage: { typescript: 1 }, byNodeType: { file: 1 } },
+      layers: [],
+      tour: [],
     }
     vi.mocked(fileExists).mockResolvedValue(true)
     vi.mocked(writeFile).mockResolvedValue()
     vi.mocked(createDirectory).mockResolvedValue()
     vi.mocked(readFile).mockResolvedValue(JSON.stringify(graph))
-    await writeGraph(root, "repo-A", graph)
-    const loaded = await readGraph(root, "repo-A")
+    await writeKnowledgeGraph(root, "repo-A", graph)
+    const loaded = await readKnowledgeGraph(root, "repo-A")
     expect(loaded?.project.name).toBe("repo-A")
     expect(loaded?.nodes).toHaveLength(1)
   })
 
   it("writes and reads index.json and meta.json", async () => {
     const index: CodeWikiIndex = { version: "1.0.0", generatedAt: "2026-06-27T00:00:00Z", repos: [] }
-    const meta: CodeWikiMeta = { lastAnalyzedAt: "2026-06-27T00:00:00Z", indexerVersion: "1.0.0", sourceFileCount: 0 }
+    const meta: AnalysisMeta = {
+      lastAnalyzedAt: "2026-06-27T00:00:00Z",
+      gitCommitHash: "",
+      version: "1.0.0",
+      analyzedFiles: 0,
+    }
     vi.mocked(fileExists).mockResolvedValue(true)
     vi.mocked(writeFile).mockResolvedValue()
     vi.mocked(createDirectory).mockResolvedValue()
@@ -74,9 +101,9 @@ describe("wiki-storage round-trips", () => {
     expect(writeFile).toHaveBeenCalledWith(expect.stringContaining("meta.json"), expect.any(String))
   })
 
-  it("readGraph returns null when missing", async () => {
+  it("readKnowledgeGraph returns null when missing", async () => {
     vi.mocked(fileExists).mockResolvedValue(false)
-    const loaded = await readGraph(root, "missing")
+    const loaded = await readKnowledgeGraph(root, "missing")
     expect(loaded).toBeNull()
   })
 })
