@@ -634,4 +634,253 @@ mod tests {
         drop(handle);
         let _ = fs::remove_dir_all(&project);
     }
+
+    /// Full real-world pipeline: invoke `codegraph init` + `codegraph
+    /// index` on a temp Rust repo, then read the SQLite store via
+    /// `run_get_graph_payload_inner` (mirroring what the TS writer
+    /// would do in production), write a UA-shaped knowledge-graph.json,
+    /// start `serve_dashboard`, and curl all the endpoints to verify
+    /// the dashboard would actually load with a real graph.
+    ///
+    /// Skipped when `codegraph` is not on PATH (CI without the CLI).
+    #[test]
+    fn real_codegraph_db_to_dashboard_pipeline() {
+        use crate::commands::code_wiki::run_get_graph_payload_inner;
+        use std::io::{Read as _, Write as _};
+        use std::time::Duration;
+
+        let bin = match which::which("codegraph") {
+            Ok(b) => b,
+            Err(_) => {
+                eprintln!("[e2e] codegraph not on PATH; skipping real pipeline test");
+                return;
+            }
+        };
+
+        // 1. Lay out a tiny Rust repo under a temp project.
+        let project = std::env::temp_dir().join(format!(
+            "codewiki-e2e-real-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&project);
+        // We need `project` again later (to pass into the server
+        // thread and to clean up at the end), so don't move it here —
+        // clone it once and use the clone for joined paths.
+        let repo = project.clone().join("raw").join("code").join("gglog");
+        let src = repo.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            src.join("lib.rs"),
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n\
+             pub fn sub(a: i32, b: i32) -> i32 { a - b }\n\
+             pub struct Counter { pub value: i32 }\n\
+             impl Counter {\
+                 pub fn new() -> Self { Self { value: 0 } }\
+                 pub fn inc(&mut self) { self.value += 1; }\
+             }\n\
+             pub fn run() -> i32 { let mut c = Counter::new(); c.inc(); c.inc(); c.value }\n",
+        )
+        .unwrap();
+
+        // 2. Run codegraph init + index against the real CLI.
+        let init_status = std::process::Command::new(&bin)
+            .arg("init").arg(&repo).status().expect("spawn codegraph init");
+        assert!(init_status.success(), "codegraph init failed: {:?}", init_status);
+        let index_status = std::process::Command::new(&bin)
+            .arg("index").arg(&repo).status().expect("spawn codegraph index");
+        assert!(index_status.success(), "codegraph index failed: {:?}", index_status);
+
+        // 3. Read the SQLite DB via our reader (same path the TS code
+        //    uses after the Rust command returns).
+        let payload = run_get_graph_payload_inner(&project, "gglog").expect("read payload");
+        assert!(!payload.nodes.is_empty(), "real DB gave 0 nodes");
+        let node_count = payload.nodes.len();
+        let edge_count = payload.edges.len();
+        let languages = payload.languages.clone();
+        eprintln!(
+            "[e2e] real DB: {} nodes, {} edges, languages={:?}",
+            node_count, edge_count, languages
+        );
+
+        // 4. Convert the codegraph payload into UA KnowledgeGraph
+        //    shape. (This is the function the TS writer performs in
+        //    production; in Rust we inline the equivalent mapping so
+        //    the e2e test is self-contained.)
+        let mut sorted_nodes = payload.nodes.clone();
+        sorted_nodes.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut sorted_edges = payload.edges.clone();
+        sorted_edges.sort_by(|a, b| a.source.cmp(&b.source).then(a.target.cmp(&b.target)));
+
+        let kg = serde_json::json!({
+            "version": "1.0.0",
+            "kind": "codebase",
+            "project": {
+                "name": "gglog",
+                "languages": payload.languages,
+                "frameworks": [],
+                "description": "",
+                "analyzedAt": "2026-06-28T00:00:00Z",
+                "gitCommitHash": payload.git_commit_hash.clone().unwrap_or_default(),
+            },
+            "nodes": sorted_nodes.iter().map(|n| {
+                let mut node = serde_json::json!({
+                    "id": n.id,
+                    "type": match n.kind.as_str() {
+                        "file" => "file",
+                        "function" | "method" => "function",
+                        "class" | "struct" | "interface" | "type_alias" | "enum" | "enum_member" => "class",
+                        "module" => "module",
+                        "constant" | "variable" | "property" => "concept",
+                        _ => "module",
+                    },
+                    "name": n.name,
+                    "summary": n.docstring.clone().unwrap_or_default(),
+                    "tags": n.tags.clone(),
+                    "complexity": "moderate",
+                });
+                if !n.file_path.is_empty() {
+                    node["filePath"] = serde_json::Value::String(n.file_path.clone());
+                }
+                if let Some(loc) = &n.location {
+                    node["lineRange"] = serde_json::json!([loc.start_line, loc.end_line]);
+                }
+                if let Some(lang) = &n.language {
+                    node["languageNotes"] = serde_json::Value::String(lang.clone());
+                }
+                node
+            }).collect::<Vec<_>>(),
+            "edges": sorted_edges.iter().filter_map(|e| {
+                let ua_type = match e.kind.as_str() {
+                    "contains" => "contains",
+                    "imports" => "imports",
+                    "calls" => "calls",
+                    _ => return None,
+                };
+                Some(serde_json::json!({
+                    "source": e.source,
+                    "target": e.target,
+                    "type": ua_type,
+                    "direction": "forward",
+                    "weight": 1.0,
+                }))
+            }).collect::<Vec<_>>(),
+            "layers": [],
+            "tour": [],
+        });
+
+        // 5. Write knowledge-graph.json + meta.json to disk.
+        let repo_dir = project.join("wiki").join("code_wiki").join("gglog");
+        fs::create_dir_all(&repo_dir).unwrap();
+        let kg_path = repo_dir.join("knowledge-graph.json");
+        fs::write(&kg_path, serde_json::to_vec_pretty(&kg).unwrap()).unwrap();
+        fs::write(
+            repo_dir.join("meta.json"),
+            br#"{"lastAnalyzedAt":"2026-06-28T00:00:00Z","gitCommitHash":"","version":"codegraph-1.0.0","analyzedFiles":2}"#,
+        )
+        .unwrap();
+        eprintln!("[e2e] wrote {} ({} bytes)", kg_path.display(), fs::metadata(&kg_path).unwrap().len());
+
+        // 6. Spin up the real dashboard server.
+        let (listener, port) = bind_local().expect("bind");
+        let token = "real_e2e_token".to_string();
+        let token_for_thread = token.clone();
+        let project_for_cleanup = project.clone();
+        let handle = thread::spawn(move || {
+            // The dashboard server reads assets from a directory; for
+            // this e2e we serve a tiny inline asset so the test is
+            // hermetic and doesn't depend on the built SPA.
+            // We need `project` again later (to pass to
+            // serve_dashboard), so don't move it into `assets`.
+            let assets = project.clone().join("assets");
+            fs::create_dir_all(&assets).unwrap();
+            fs::write(
+                assets.join("index.html"),
+                br#"<!doctype html><html><body>REAL_DASHBOARD_INDEX</body></html>"#,
+            )
+            .unwrap();
+            serve_dashboard(
+                listener,
+                assets,
+                project,
+                "gglog".to_string(),
+                token_for_thread,
+            )
+        });
+
+        // 7. curl-equivalent checks against all four data endpoints.
+        let fetch = |url_path: &str, expect_status: u16| -> String {
+            let mut stream = TcpStream::connect_timeout(
+                &format!("127.0.0.1:{port}").parse().unwrap(),
+                Duration::from_secs(2),
+            )
+            .expect("connect");
+            stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+            stream
+                .write_all(
+                    format!(
+                        "GET {url_path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .expect("write");
+            let mut buf = String::new();
+            stream.read_to_string(&mut buf).expect("read");
+            let status = buf.lines().next().unwrap_or("");
+            assert!(
+                status.contains(&format!(" {expect_status} ")),
+                "expected {expect_status} for {url_path}, got: {status}"
+            );
+            buf
+        };
+
+        let body = fetch("/", 200);
+        assert!(body.contains("REAL_DASHBOARD_INDEX"), "/ did not serve index.html");
+
+        let body = fetch(&format!("/knowledge-graph.json?token={token}"), 200);
+        let kg_parsed: serde_json::Value = serde_json::from_str(
+            body.split("\r\n\r\n").nth(1).expect("body"),
+        )
+        .expect("kg parses");
+        assert_eq!(kg_parsed["project"]["name"], "gglog");
+        assert_eq!(kg_parsed["kind"], "codebase");
+        let parsed_nodes = kg_parsed["nodes"].as_array().unwrap().len();
+        let parsed_edges = kg_parsed["edges"].as_array().unwrap().len();
+        eprintln!("[e2e] served knowledge-graph.json: {} nodes, {} edges", parsed_nodes, parsed_edges);
+        assert_eq!(parsed_nodes, node_count, "served node count differs from real DB");
+
+        // All UA types are real types, not "module" fallback.
+        let types: std::collections::HashSet<String> = kg_parsed["nodes"]
+            .as_array().unwrap()
+            .iter()
+            .map(|n| n["type"].as_str().unwrap().to_string())
+            .collect();
+        eprintln!("[e2e] served node types: {:?}", types);
+        assert!(types.contains("file"), "expected 'file' nodes");
+        assert!(types.contains("function") || types.contains("class"), "expected function/class nodes");
+
+        // Token gating.
+        let _ = fetch("/knowledge-graph.json", 403);
+        let _ = fetch("/knowledge-graph.json?token=wrong", 403);
+
+        let body = fetch(&format!("/meta.json?token={token}"), 200);
+        assert!(body.contains("codegraph-1.0.0"), "/meta.json body wrong: {body}");
+
+        let body = fetch(&format!("/config.json?token={token}"), 200);
+        assert!(body.contains("\"autoUpdate\":false"), "/config.json body wrong: {body}");
+
+        // SPA fallback.
+        let body = fetch("/any-spa-route", 200);
+        assert!(body.contains("REAL_DASHBOARD_INDEX"), "SPA fallback wrong: {body}");
+
+        drop(handle);
+        // `project` was moved into the server thread above, but we
+        // still need it here to clean up the temp dir. Clone it
+        // before the move and use the clone for the cleanup.
+        let _ = fs::remove_dir_all(&project_for_cleanup);
+        eprintln!("[e2e] all checks passed");
+    }
 }
