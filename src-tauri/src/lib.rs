@@ -182,6 +182,9 @@ pub fn run() {
             app.manage(commands::codex_cli::CodexCliState::default());
             app.manage(commands::file_sync::FileSyncState::default());
             app.manage(commands::code_wiki_dashboard::DashboardState::default());
+            app.manage(std::sync::Arc::new(
+                commands::code_wiki_pipeline::PipelineRegistry::default(),
+            ));
             app.manage(CloseBehaviorState(Mutex::new("minimize".to_string())));
             let tray_available = match tray::create_tray(app.handle()) {
                 Ok(()) => true,
@@ -249,6 +252,8 @@ pub fn run() {
             commands::code_wiki_dashboard::code_wiki_open_dashboard,
             commands::code_wiki_dashboard::code_wiki_close_dashboard,
             commands::code_wiki_dashboard::code_wiki_list_dashboards,
+            commands::code_wiki_pipeline::code_wiki_run_pipeline,
+            commands::code_wiki_pipeline::code_wiki_cancel_pipeline,
             commands::file_sync::start_project_file_watcher,
             commands::file_sync::stop_project_file_watcher,
             commands::file_sync::rescan_project_files,

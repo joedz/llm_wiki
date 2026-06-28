@@ -10,9 +10,13 @@ import {
   CheckCircle2,
   AlertCircle,
   Clock,
+  Sparkles,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useWikiStore } from "@/stores/wiki-store"
+import { usePipelineStore } from "@/stores/code-wiki-pipeline-store"
+import { startPipeline } from "@/lib/code-wiki/pipeline"
+import { PipelineProgress } from "./pipeline-progress"
 import { normalizePath } from "@/lib/path-utils"
 import { useTranslation } from "react-i18next"
 
@@ -58,6 +62,16 @@ function formatRelative(iso: string): string {
 export function CodeWikiView() {
   const { t } = useTranslation()
   const project = useWikiStore((s) => s.project)
+  // Subscribe to pipeline progress events once per app load.
+  // (The store deduplicates via pipelineId, so it's safe to call
+  // here in addition to anywhere else.)
+  useEffect(() => {
+    usePipelineStore.getState().startListen()
+  }, [])
+  const pipelineRun = usePipelineStore((s) =>
+    project ? s.byProject[project.path] : undefined,
+  )
+  const beginPipeline = usePipelineStore((s) => s.begin)
   const [repos, setRepos] = useState<RepoStatus[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -126,6 +140,50 @@ export function CodeWikiView() {
     [project],
   )
 
+  const analyzeRepo = useCallback(
+    async (repoName: string) => {
+      if (!project) return
+      const projectPath = normalizePath(project.path)
+      // Optimistically mark the run as "started" so the UI shows
+      // a spinner immediately; the actual `started` event from Rust
+      // will replace this with the real pipelineId.
+      beginPipeline(projectPath, repoName)
+      try {
+        await startPipeline(projectPath, repoName)
+      } catch (err) {
+        // Surface the error via a synthetic warning event so the
+        // progress panel reflects the failure rather than hanging
+        // forever in "running" state.
+        const pipelineId = `pipeline-failed-${Date.now()}`
+        usePipelineStore.setState((s) => ({
+          byProject: {
+            ...s.byProject,
+            [projectPath]: {
+              ...(s.byProject[projectPath] ?? {
+                pipelineId,
+                repoName,
+                startedAt: Date.now(),
+                currentPhase: 0,
+                currentPhaseLabel: "Pre-flight",
+                phaseStatus: "error" as const,
+                batchDone: 0,
+                batchTotal: 0,
+                warnings: [],
+                result: "error" as const,
+                summary: null,
+                unlisten: null,
+              }),
+              result: "error" as const,
+              phaseStatus: "error" as const,
+              warnings: [`startPipeline failed: ${String(err)}`],
+            },
+          },
+        }))
+      }
+    },
+    [project, beginPipeline],
+  )
+
   const copyUrl = useCallback(async (repoName: string) => {
     const state = openStates[repoName]
     if (state?.kind !== "open") return
@@ -188,6 +246,12 @@ export function CodeWikiView() {
         </div>
       )}
 
+      {project && pipelineRun && (
+        <div className="border-b p-3">
+          <PipelineProgress projectPath={project.path} />
+        </div>
+      )}
+
       <div className="flex-1 overflow-auto p-4">
         {repos.length === 0 ? (
           <EmptyState onBuild={async () => {
@@ -213,6 +277,7 @@ export function CodeWikiView() {
                 buildState={buildStates[repo.name] ?? { kind: "idle" }}
                 openState={openStates[repo.name] ?? { kind: "idle" }}
                 onBuild={() => buildRepo(repo.name)}
+                onAnalyze={() => analyzeRepo(repo.name)}
                 onOpen={() => openDashboard(repo.name)}
                 onCopyUrl={() => copyUrl(repo.name)}
                 copied={copiedRepo === repo.name}
@@ -243,6 +308,7 @@ function RepoRow({
   buildState,
   openState,
   onBuild,
+  onAnalyze,
   onOpen,
   onCopyUrl,
   copied,
@@ -250,6 +316,7 @@ function RepoRow({
   repo: RepoStatus
   buildState: BuildState
   openState: OpenState
+  onAnalyze: () => void
   onBuild: () => void
   onOpen: () => void
   onCopyUrl: () => void
@@ -258,6 +325,11 @@ function RepoRow({
   const { t } = useTranslation()
   const built = Boolean(repo.lastAnalyzedAt)
   const langs = repo.languages.length > 0 ? repo.languages.join(", ") : "—"
+  const analyzing = usePipelineStore((s) =>
+    Object.values(s.byProject).some(
+      (run) => run.repoName === repo.name && run.result === "running",
+    ),
+  )
   return (
     <li className="rounded-md border bg-card p-3 text-card-foreground shadow-sm">
       <div className="flex items-start justify-between gap-3">
@@ -303,6 +375,18 @@ function RepoRow({
             {buildState.kind === "building"
               ? t("codeWiki.building", "Building…")
               : t("codeWiki.build", built ? "Rebuild" : "Build")}
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={onAnalyze}
+            disabled={analyzing}
+            title={t("codeWiki.analyzeTooltip", "Run the 7-phase analysis pipeline (preflight, scan, batch, save)")}
+          >
+            <Sparkles className="mr-1 h-3.5 w-3.5" />
+            {analyzing
+              ? t("codeWiki.analyzing", "Analyzing…")
+              : t("codeWiki.analyze", "Analyze")}
           </Button>
           <Button
             variant="default"

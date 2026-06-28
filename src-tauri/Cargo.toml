@@ -69,6 +69,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+tempfile = "3"
 
 [profile.release]
 codegen-units = 1
