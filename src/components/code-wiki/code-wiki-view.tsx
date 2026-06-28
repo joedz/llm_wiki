@@ -15,7 +15,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { useWikiStore } from "@/stores/wiki-store"
 import { usePipelineStore } from "@/stores/code-wiki-pipeline-store"
-import { startPipeline } from "@/lib/code-wiki/pipeline"
+import { startPipeline, llmSpecFromConfig, hasLlmConfig } from "@/lib/code-wiki/pipeline"
 import { PipelineProgress } from "./pipeline-progress"
 import { normalizePath } from "@/lib/path-utils"
 import { useTranslation } from "react-i18next"
@@ -148,8 +148,12 @@ export function CodeWikiView() {
       // a spinner immediately; the actual `started` event from Rust
       // will replace this with the real pipelineId.
       beginPipeline(projectPath, repoName)
+      // Build the LLM spec from the chat panel's LlmConfig (or
+      // undefined to fall back to the codegraph-only M1 path).
+      const llmConfig = useWikiStore.getState().llmConfig
+      const llm = llmSpecFromConfig(llmConfig)
       try {
-        await startPipeline(projectPath, repoName)
+        await startPipeline(projectPath, repoName, llm)
       } catch (err) {
         // Surface the error via a synthetic warning event so the
         // progress panel reflects the failure rather than hanging
@@ -386,7 +390,9 @@ function RepoRow({
             <Sparkles className="mr-1 h-3.5 w-3.5" />
             {analyzing
               ? t("codeWiki.analyzing", "Analyzing…")
-              : t("codeWiki.analyze", "Analyze")}
+              : hasLlmConfig(useWikiStore.getState().llmConfig)
+                ? t("codeWiki.analyzeWithLlm", "Analyze (LLM)")
+                : t("codeWiki.analyze", "Analyze")}
           </Button>
           <Button
             variant="default"

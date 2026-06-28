@@ -42,8 +42,65 @@ export type ProgressEvent =
   | { kind: "cancelled"; pipelineId: string; phase: number; partialSaved: boolean }
   | { kind: "done"; pipelineId: string; summary: PipelineSummary }
 
-export function startPipeline(projectPath: string, repoName: string): Promise<void> {
-  return invoke("code_wiki_run_pipeline", { projectPath, repoName })
+export function startPipeline(
+  projectPath: string,
+  repoName: string,
+  llm?: LlmRequestSpec,
+): Promise<void> {
+  return invoke("code_wiki_run_pipeline", { projectPath, repoName, llm })
+}
+
+/**
+ * Subset of `LlmConfig` that the code-wiki pipeline needs to
+ * make an HTTP call. The Rust side accepts this and routes the
+ * request to the right provider (Anthropic, OpenAI, Ollama,
+ * custom). We don't pass the full LlmConfig because the chat
+ * panel's other fields (apiMode, reasoning, etc.) are irrelevant
+ * to the code-wiki batch calls.
+ */
+export interface LlmRequestSpec {
+  provider: "anthropic" | "openai" | "ollama" | "custom"
+  apiKey: string
+  model: string
+  baseUrl?: string
+  maxTokens?: number
+  temperature?: number
+}
+
+/**
+ * Convert a full `LlmConfig` (the chat panel's shape, from
+ * `useWikiStore.llmConfig`) into the pipeline's `LlmRequestSpec`.
+ * Returns `null` if the config is missing the API key or model
+ * — the caller treats that as "no LLM available" and falls back
+ * to the codegraph-only path.
+ */
+export function llmSpecFromConfig(
+  cfg: { provider?: string; apiKey?: string; model?: string; ollamaUrl?: string; customEndpoint?: string } | null | undefined,
+): LlmRequestSpec | null {
+  if (!cfg) return null
+  const provider = (cfg.provider ?? "").toLowerCase()
+  if (!cfg.apiKey && provider !== "ollama") return null
+  if (!cfg.model) return null
+  const mapped: LlmRequestSpec["provider"] =
+    provider === "anthropic" ? "anthropic"
+    : provider === "ollama" ? "ollama"
+    : provider === "custom" ? "custom"
+    : "openai"
+  const spec: LlmRequestSpec = {
+    provider: mapped,
+    apiKey: cfg.apiKey ?? "",
+    model: cfg.model,
+  }
+  if (mapped === "ollama" && cfg.ollamaUrl) spec.baseUrl = cfg.ollamaUrl
+  else if (mapped === "custom" && cfg.customEndpoint) spec.baseUrl = cfg.customEndpoint
+  return spec
+}
+
+/** Convenience: does the current LlmConfig look usable? */
+export function hasLlmConfig(
+  cfg: { apiKey?: string; model?: string; provider?: string; ollamaUrl?: string; customEndpoint?: string } | null | undefined,
+): boolean {
+  return llmSpecFromConfig(cfg) !== null
 }
 
 export function cancelPipeline(pipelineId: string): Promise<boolean> {

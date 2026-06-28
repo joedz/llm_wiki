@@ -10,7 +10,7 @@
 // tour, graph review) are M3 work and not invoked here.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -22,10 +22,12 @@ use tokio::task;
 use crate::commands::code_wiki::{
     run_get_graph_payload_inner, run_indexer_inner, repo_root, GRAPH_FILE, META_FILE,
 };
-use crate::commands::code_wiki_batcher::{plan_batches_inner, write_batches_plan};
+use crate::commands::code_wiki_analyzer::{analyze_batch as analyze_one_batch, FileEnrichment};
+use crate::commands::code_wiki_batcher::{plan_batches_inner, write_batches_plan, BatchEntry};
 use crate::commands::code_wiki_ignore::generate_understandignore_inner;
 use crate::commands::code_wiki_save::{write_atomic, write_fingerprints};
-use crate::commands::code_wiki_scanner::scan_project_inner;
+use crate::commands::code_wiki_scanner::{scan_project_inner, ScanResult};
+use crate::llm_client::{LlmProvider, LlmRequest};
 
 const UNDERSTAND_DIR: &str = ".understand";
 const SCAN_RESULT_FILE: &str = "scan-result.json";
@@ -35,6 +37,8 @@ const CONFIG_FILE: &str = "config.json";
 const PIPELINE_EVENT: &str = "codewiki-pipeline-progress";
 
 const DEFAULT_BATCH_SIZE: u32 = 15;
+const DEFAULT_LLM_CONCURRENCY: u32 = 5;
+const DEFAULT_LLM_BUDGET: u32 = 100;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PipelineConfig {
@@ -43,6 +47,44 @@ pub struct PipelineConfig {
     pub batch_size: u32,
     pub concurrency: u32,
     pub incremental: bool,
+}
+
+/// Tauri-friendly shape for the LLM request coming from TS.
+/// Mirrors the chat panel's `LlmConfig` provider union; the
+/// pipeline only needs the four fields required to make an
+/// HTTP call. Other LlmConfig fields (apiMode, reasoning, etc.)
+/// are ignored — the chat panel handles them.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LlmRequestSpec {
+    pub provider: String, // "anthropic" | "openai" | "ollama" | "custom"
+    pub api_key: String,
+    pub model: String,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+}
+
+impl LlmRequestSpec {
+    pub fn into_request(&self, system: String, user: String) -> LlmRequest {
+        LlmRequest {
+            provider: match self.provider.as_str() {
+                "anthropic" => LlmProvider::Anthropic,
+                "ollama" => LlmProvider::Ollama,
+                "custom" => LlmProvider::Custom,
+                _ => LlmProvider::Openai,
+            },
+            api_key: self.api_key.clone(),
+            model: self.model.clone(),
+            base_url: self.base_url.clone(),
+            system,
+            user,
+            max_tokens: self.max_tokens.unwrap_or(4096),
+            temperature: self.temperature.unwrap_or(0.2),
+        }
+    }
 }
 
 impl Default for PipelineConfig {
@@ -335,17 +377,24 @@ fn build_ua_graph(
 /// task. The pipeline emits `codewiki-pipeline-progress` events on
 /// `app` for every state change. Returns once the task is spawned;
 /// the caller listens for the `Done` event to get the final summary.
+///
+/// When `llm` is provided, Phase 2 (analyze) is LLM-enriched:
+/// each batch of files is sent to the LLM and the response is
+/// applied as `summary`/`tags`/`complexity` on the file-level nodes.
+/// When `llm` is `None`, Phase 2 falls back to the codegraph-only
+/// build (M1 behavior).
 #[tauri::command]
 pub async fn code_wiki_run_pipeline(
     project_path: String,
     repo_name: String,
+    llm: Option<LlmRequestSpec>,
     app: AppHandle,
     state: tauri::State<'_, Arc<PipelineRegistry>>,
 ) -> Result<(), String> {
     let registry = state.inner().clone();
     let app_for_task = app.clone();
     tokio::spawn(async move {
-        let result = run_pipeline(app_for_task, registry, project_path, repo_name).await;
+        let result = run_pipeline(app_for_task, registry, project_path, repo_name, llm).await;
         if let Err(e) = result {
             eprintln!("[code-wiki pipeline] failed: {e}");
         }
@@ -368,42 +417,44 @@ pub async fn run_pipeline(
     registry: Arc<PipelineRegistry>,
     project_path: String,
     repo_name: String,
+    llm: Option<LlmRequestSpec>,
 ) -> Result<PipelineSummary, String> {
-    let project_path_buf = PathBuf::from(&project_path);
     let pipeline_id = registry.new_id();
     let cancel = registry.register_cancel(&pipeline_id);
 
-    let pid_for_task = pipeline_id.clone();
     let app_for_task = app.clone();
+    let pid_for_task = pipeline_id.clone();
     let project_for_task = project_path.clone();
     let repo_for_task = repo_name.clone();
     let registry_for_task = registry.clone();
 
-    let handle = task::spawn_blocking(move || {
-        run_pipeline_blocking(
-            &app_for_task,
-            &pid_for_task,
-            &project_for_task,
-            &repo_for_task,
-            &cancel,
-        )
-    });
-
-    let result = handle
-        .await
-        .map_err(|e| format!("pipeline task panicked: {e}"))?;
+    let result = run_pipeline_orchestrator(
+        &app_for_task,
+        &pid_for_task,
+        &project_for_task,
+        &repo_for_task,
+        llm,
+        &cancel,
+        Instant::now(),
+    )
+    .await;
     registry_for_task.unregister(&pipeline_id);
     result
 }
 
-fn run_pipeline_blocking(
+/// Async orchestrator. The phases up to and including 1.5 are
+/// synchronous (file I/O only); Phase 2 (LLM) is async; Phase 7
+/// is sync. We thread an `Instant` for the wall-clock duration.
+async fn run_pipeline_orchestrator(
     app: &AppHandle,
     pipeline_id: &str,
     project_path: &str,
     repo_name: &str,
+    llm: Option<LlmRequestSpec>,
     cancel: &AtomicBool,
+    started: Instant,
 ) -> Result<PipelineSummary, String> {
-    let started = Instant::now();
+    let started = started;
     emit(
         app,
         &ProgressEvent::Started {
@@ -427,7 +478,7 @@ fn run_pipeline_blocking(
 
     // --- Phase 0: pre-flight (config) ---
     if check_cancel(cancel) {
-        return Ok(cancelled_summary(pipeline_id, &project_path, repo_name, started, &warnings));
+        return Ok(cancelled_summary(pipeline_id, project_path, repo_name, started, &warnings));
     }
     emit_phase(app, pipeline_id, 0, "Pre-flight", "running");
     let _ = write_config(&understand_dir, &PipelineConfig::default());
@@ -435,7 +486,7 @@ fn run_pipeline_blocking(
 
     // --- Phase 0.5: ignore (project root) ---
     if check_cancel(cancel) {
-        return Ok(cancelled_summary(pipeline_id, &project_path, repo_name, started, &warnings));
+        return Ok(cancelled_summary(pipeline_id, project_path, repo_name, started, &warnings));
     }
     emit_phase(app, pipeline_id, 1, "Ignore config", "running");
     if let Err(e) = generate_understandignore_inner(&project_root) {
@@ -446,7 +497,7 @@ fn run_pipeline_blocking(
 
     // --- Phase 1: scan (the repo, since codegraph lives there) ---
     if check_cancel(cancel) {
-        return Ok(cancelled_summary(pipeline_id, &project_path, repo_name, started, &warnings));
+        return Ok(cancelled_summary(pipeline_id, project_path, repo_name, started, &warnings));
     }
     emit_phase(app, pipeline_id, 2, "Scan", "running");
     let scan = match scan_project_inner(&repo_dir) {
@@ -468,7 +519,7 @@ fn run_pipeline_blocking(
 
     // --- Phase 1.5: batch ---
     if check_cancel(cancel) {
-        return Ok(cancelled_summary(pipeline_id, &project_path, repo_name, started, &warnings));
+        return Ok(cancelled_summary(pipeline_id, project_path, repo_name, started, &warnings));
     }
     emit_phase(app, pipeline_id, 3, "Batch", "running");
     let plan = plan_batches_inner(&scan.files, DEFAULT_BATCH_SIZE, &[]);
@@ -489,37 +540,77 @@ fn run_pipeline_blocking(
     }
     emit_phase(app, pipeline_id, 3, "Batch", "done");
 
-    // --- Phase 2 (M1 stub): codegraph-only build ---
+    // --- Phase 2 ---
     if check_cancel(cancel) {
-        return Ok(cancelled_summary(pipeline_id, &project_path, repo_name, started, &warnings));
+        return Ok(cancelled_summary(pipeline_id, project_path, repo_name, started, &warnings));
     }
-    emit_phase(app, pipeline_id, 4, "Analyze (no LLM)", "running");
-    let graph = match build_ua_graph_via_codegraph(
+    let phase2_label = if llm.is_some() { "Analyze (LLM)" } else { "Analyze (no LLM)" };
+    emit_phase(app, pipeline_id, 4, phase2_label, "running");
+
+    let mut graph = match build_ua_graph_via_codegraph(
         &project_root,
         repo_name,
         &scan,
     ) {
         Ok(g) => g,
         Err(e) => {
-            let msg = format!("phase 2 build failed: {e}");
+            let msg = format!("phase 2 codegraph build failed: {e}");
             emit_warning(app, pipeline_id, 4, &msg);
             return Err(msg);
         }
     };
-    emit_phase(app, pipeline_id, 4, "Analyze (no LLM)", "done");
 
-    // --- Phase 3-6 stubs (skipped in M1) ---
+    if let Some(llm_spec) = llm {
+        if plan.batches.len() as u32 > DEFAULT_LLM_BUDGET {
+            let msg = format!(
+                "Batch count {} exceeds LLM budget cap {}; truncating to first {}",
+                plan.batches.len(),
+                DEFAULT_LLM_BUDGET,
+                DEFAULT_LLM_BUDGET
+            );
+            emit_warning(app, pipeline_id, 4, &msg);
+            warnings.push(msg);
+        }
+        let runnable_batches: Vec<&BatchEntry> = plan
+            .batches
+            .iter()
+            .take(DEFAULT_LLM_BUDGET as usize)
+            .collect();
+        let runnable_total = runnable_batches.len() as u32;
+        match run_phase2_llm(
+            app,
+            pipeline_id,
+            &project_root,
+            &scan,
+            &runnable_batches,
+            runnable_total,
+            &llm_spec,
+            cancel,
+            &mut warnings,
+        )
+        .await
+        {
+            Ok(enrichments) => {
+                apply_enrichments(&mut graph, &enrichments);
+            }
+            Err(msg) => {
+                emit_warning(app, pipeline_id, 4, &msg);
+                warnings.push(msg);
+            }
+        }
+    }
+    emit_phase(app, pipeline_id, 4, phase2_label, "done");
+
+    // --- Phase 3-6 stubs ---
     for (phase, label) in [(5u32, "Assemble review"), (6, "Architecture + tour")] {
         emit_phase(app, pipeline_id, phase, label, "done");
     }
 
-    // --- Phase 7: save (fingerprints → meta → graph all atomic) ---
+    // --- Phase 7 ---
     if check_cancel(cancel) {
-        return Ok(cancelled_summary(pipeline_id, &project_path, repo_name, started, &warnings));
+        return Ok(cancelled_summary(pipeline_id, project_path, repo_name, started, &warnings));
     }
     emit_phase(app, pipeline_id, 7, "Save", "running");
-
-    // 7a. Fingerprints first (UA invariant: must succeed before meta)
     let fp_path = match write_fingerprints(
         &project_root,
         &understand_dir,
@@ -533,8 +624,6 @@ fn run_pipeline_blocking(
             understand_dir.join(FINGERPRINTS_FILE)
         }
     };
-
-    // 7b. knowledge-graph.json (atomic)
     let graph_path = repo_dir.join(GRAPH_FILE);
     let graph_bytes = serde_json::to_vec_pretty(&graph)
         .map_err(|e| format!("serialize graph: {e}"))?;
@@ -543,8 +632,6 @@ fn run_pipeline_blocking(
         emit_warning(app, pipeline_id, 7, &msg);
         return Err(msg);
     }
-
-    // 7c. meta.json
     let meta = serde_json::json!({
         "lastAnalyzedAt": now_iso(),
         "gitCommitHash": scan.git_commit_hash,
@@ -617,6 +704,116 @@ fn build_ua_graph_via_codegraph(
         &payload.nodes,
         &payload.edges,
     ))
+}
+
+/// Apply LLM-produced enrichments to the in-memory graph.
+/// Currently we only enrich file-level nodes by their `filePath`.
+fn apply_enrichments(graph: &mut KnowledgeGraph, enrichments: &[FileEnrichment]) {
+    for enr in enrichments {
+        if let Some(node) = graph.nodes.iter_mut().find(|n| n.file_path == enr.path) {
+            node.summary = enr.summary.clone();
+            node.tags = enr.tags.clone();
+            node.complexity = enr.complexity.clone();
+        }
+    }
+}
+
+/// Run Phase 2 LLM enrichment for a list of batches. Up to
+/// `DEFAULT_LLM_CONCURRENCY` (5) batches run in parallel. Each
+/// batch emits a `Batch` progress event. Per-batch failures are
+/// recorded as warnings; the caller decides whether to abort.
+async fn run_phase2_llm(
+    app: &AppHandle,
+    pipeline_id: &str,
+    project_root: &Path,
+    scan: &ScanResult,
+    batches: &[&BatchEntry],
+    total: u32,
+    llm_spec: &LlmRequestSpec,
+    cancel: &AtomicBool,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<FileEnrichment>, String> {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::Semaphore;
+
+    // Build a path -> ScannedFile lookup. The ScannedFile is
+    // borrowed by the analysis tasks; we clone the file paths
+    // into owned ScannedFile values per task to avoid lifetime
+    // issues with concurrent borrows.
+    let paths: Vec<String> = batches
+        .iter()
+        .flat_map(|b| b.files.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let _ = paths; // not needed directly; the batch loop reads them
+
+    let sem = Arc::new(Semaphore::new(DEFAULT_LLM_CONCURRENCY as usize));
+    let mut tasks = tokio::task::JoinSet::new();
+
+    for batch in batches {
+        if check_cancel(cancel) {
+            break;
+        }
+        let permit = sem.clone().acquire_owned().await.map_err(|e| {
+            format!("acquire semaphore permit: {e}")
+        })?;
+        let batch = (*batch).clone();
+        let project = project_root.to_path_buf();
+        let llm_spec = llm_spec.clone();
+        let scan_files: Vec<_> = scan
+            .files
+            .iter()
+            .filter(|f| batch.files.contains(&f.path))
+            .cloned()
+            .collect();
+        let files_by_path: HashMap<String, crate::commands::code_wiki_scanner::ScannedFile> =
+            scan_files.iter().map(|f| (f.path.clone(), f.clone())).collect();
+        let app = app.clone();
+        let pid = pipeline_id.to_string();
+        let total_u32 = total;
+
+        tasks.spawn(async move {
+            let _permit = permit; // dropped on task completion
+            emit_batch(&app, &pid, 4, batch.batch_index, total_u32, batch.files.len() as u32, "running");
+            let system = "You are an expert code analyst.".to_string();
+            let req = llm_spec.into_request(system, String::new());
+            // Borrow the owned ScannedFile map as &ScannedFile values
+            // for the analyzer. This is safe because `files_by_path`
+            // is moved into the task and outlives the analyzer call.
+            let refs: HashMap<String, &crate::commands::code_wiki_scanner::ScannedFile> =
+                files_by_path.iter().map(|(k, v)| (k.clone(), v)).collect();
+            let result = analyze_one_batch(&batch, &project, &refs, req).await;
+            let status = if result.is_ok() { "done" } else { "error" };
+            emit_batch(
+                &app,
+                &pid,
+                4,
+                batch.batch_index,
+                total_u32,
+                batch.files.len() as u32,
+                status,
+            );
+            (batch.batch_index, result)
+        });
+    }
+
+    let mut enrichments: Vec<FileEnrichment> = Vec::new();
+    while let Some(joined) = tasks.join_next().await {
+        let (_idx, result) = match joined {
+            Ok(t) => t,
+            Err(e) => {
+                warnings.push(format!("LLM batch task panicked: {e}"));
+                continue;
+            }
+        };
+        match result {
+            Ok(enr) => enrichments.extend(enr.enrichments),
+            Err(e) => warnings.push(format!("LLM batch failed: {e}")),
+        }
+    }
+    Ok(enrichments)
 }
 
 fn cancelled_summary(
@@ -859,6 +1056,127 @@ mod tests {
         assert!(json.contains("\"frameworks\":[\"Tauri\"]"), "got: {json}");
         assert!(json.contains("\"gitCommitHash\":\"deadbeef\""), "got: {json}");
         assert!(json.contains("\"kind\":\"codebase\""), "got: {json}");
+    }
+
+    #[test]
+    fn llm_request_spec_converts_provider_strings() {
+        for (s, expected) in [
+            ("anthropic", LlmProvider::Anthropic),
+            ("openai", LlmProvider::Openai),
+            ("ollama", LlmProvider::Ollama),
+            ("custom", LlmProvider::Custom),
+            ("unknown", LlmProvider::Openai), // falls back to OpenAI
+        ] {
+            let spec = LlmRequestSpec {
+                provider: s.to_string(),
+                api_key: "k".to_string(),
+                model: "m".to_string(),
+                base_url: None,
+                max_tokens: None,
+                temperature: None,
+            };
+            let req = spec.into_request("sys".to_string(), "user".to_string());
+            assert!(
+                std::mem::discriminant(&req.provider) == std::mem::discriminant(&expected),
+                "provider {s} mapped wrong: got {:?}", req.provider
+            );
+        }
+    }
+
+    #[test]
+    fn llm_request_spec_applies_max_tokens_and_temperature_defaults() {
+        let spec = LlmRequestSpec {
+            provider: "anthropic".to_string(),
+            api_key: "k".to_string(),
+            model: "claude-3-5-sonnet".to_string(),
+            base_url: Some("https://proxy.example.com".to_string()),
+            max_tokens: None,
+            temperature: None,
+        };
+        let req = spec.into_request("s".to_string(), "u".to_string());
+        assert_eq!(req.max_tokens, 4096);
+        assert!((req.temperature - 0.2).abs() < 0.001);
+        assert_eq!(req.base_url, Some("https://proxy.example.com".to_string()));
+    }
+
+    #[test]
+    fn apply_enrichments_mutates_matching_nodes() {
+        let mut g = build_empty_graph();
+        g.nodes.push(make_node("src/lib.rs", "moderate"));
+        g.nodes.push(make_node("src/main.rs", "moderate"));
+        let enrichments = vec![
+            FileEnrichment {
+                path: "src/lib.rs".to_string(),
+                summary: "Tiny log lib.".to_string(),
+                tags: vec!["logging".to_string()],
+                complexity: "simple".to_string(),
+            },
+            FileEnrichment {
+                path: "src/main.rs".to_string(),
+                summary: "Demo entry point.".to_string(),
+                tags: vec!["demo".to_string(), "cli".to_string()],
+                complexity: "simple".to_string(),
+            },
+        ];
+        apply_enrichments(&mut g, &enrichments);
+        assert_eq!(g.nodes[0].summary, "Tiny log lib.");
+        assert_eq!(g.nodes[0].tags, vec!["logging".to_string()]);
+        assert_eq!(g.nodes[0].complexity, "simple");
+        assert_eq!(g.nodes[1].summary, "Demo entry point.");
+        assert_eq!(
+            g.nodes[1].tags,
+            vec!["demo".to_string(), "cli".to_string()]
+        );
+    }
+
+    #[test]
+    fn apply_enrichments_ignores_unknown_paths() {
+        let mut g = build_empty_graph();
+        g.nodes.push(make_node("src/lib.rs", "moderate"));
+        let enrichments = vec![FileEnrichment {
+            path: "src/other.rs".to_string(),
+            summary: "X".to_string(),
+            tags: vec![],
+            complexity: "simple".to_string(),
+        }];
+        apply_enrichments(&mut g, &enrichments);
+        // Original node unchanged
+        assert_eq!(g.nodes[0].summary, "");
+        assert_eq!(g.nodes[0].complexity, "moderate");
+    }
+
+    // -- helpers for the apply_enrichments tests --
+    fn make_node(path: &str, complexity: &str) -> GraphNode {
+        GraphNode {
+            id: format!("file:{path}"),
+            kind: "file".to_string(),
+            name: path.rsplit_once('/').map(|(_, n)| n).unwrap_or(path).to_string(),
+            file_path: path.to_string(),
+            summary: String::new(),
+            tags: vec![],
+            complexity: complexity.to_string(),
+            location: None,
+            language_notes: None,
+        }
+    }
+
+    fn build_empty_graph() -> KnowledgeGraph {
+        KnowledgeGraph {
+            version: "1.0.0".to_string(),
+            kind: "codebase".to_string(),
+            project: ProjectMeta {
+                name: "demo".to_string(),
+                languages: vec!["rust".to_string()],
+                frameworks: vec![],
+                description: String::new(),
+                analyzed_at: "2026-06-29T00:00:00.000Z".to_string(),
+                git_commit_hash: String::new(),
+            },
+            nodes: vec![],
+            edges: vec![],
+            layers: vec![],
+            tour: vec![],
+        }
     }
 
     /// End-to-end smoke test: run the full 7-phase pipeline against

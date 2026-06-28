@@ -1,6 +1,7 @@
 pub mod chat;
 pub mod claude_cli;
 pub mod code_wiki;
+pub mod code_wiki_analyzer;
 pub mod code_wiki_dashboard;
 pub mod code_wiki_batcher;
 pub mod code_wiki_ignore;
