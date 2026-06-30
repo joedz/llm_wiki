@@ -67,6 +67,13 @@ interface ProviderConfig {
 const JSON_CONTENT_TYPE = "application/json"
 
 /**
+ * The `Origin` value we send to local-LLM servers. Exported so tests
+ * can mirror the production constant rather than restating the string
+ * (which would drift the moment someone renames the constant).
+ */
+export const LOCAL_LLM_ORIGIN = "http://localhost"
+
+/**
  * Origin header for local-LLM endpoints (Ollama, LM Studio, llama.cpp
  * server, LocalAI, vLLM, …).
  *
@@ -115,7 +122,7 @@ const JSON_CONTENT_TYPE = "application/json"
  * stripping it. End-to-end our value wins.
  */
 function localLlmOriginHeader(): Record<string, string> {
-  return { Origin: "http://localhost" }
+  return { Origin: LOCAL_LLM_ORIGIN }
 }
 
 function parseOpenAiLine(line: string): string | null {

@@ -43,6 +43,11 @@ vi.mock("@/commands/fs", () => ({
 import { streamChat } from "./llm-client"
 import type { LlmConfig } from "@/stores/wiki-store"
 
+// What the production code actually sends. Mirrors
+// `localLlmOriginHeader()` in llm-providers.ts. We import via the
+// real constant so a future rename there breaks this test loudly.
+import { LOCAL_LLM_ORIGIN } from "./llm-providers"
+
 interface FakeOllamaHandle {
   url: string
   receivedRequests: () => Array<{ origin?: string; userAgent?: string; body: string }>
@@ -51,15 +56,17 @@ interface FakeOllamaHandle {
 }
 
 type RejectMode =
-  | { kind: "accept-same-origin"; selfOrigin: string }
+  | { kind: "accept-origins"; allowedOrigins: string[] }
   | { kind: "reject-all" }
 
 /**
  * Start a fake Ollama-compatible server on 127.0.0.1. Behavior is
  * scriptable per test:
- *   - "accept-same-origin": 200 + SSE stream when the request's
- *     Origin equals the configured selfOrigin; 403 with a body
- *     mimicking Ollama's real CORS rejection otherwise.
+ *   - "accept-origins": 200 + SSE stream when the request's Origin is
+ *     in `allowedOrigins`; 403 with a body mimicking Ollama's real
+ *     CORS rejection otherwise. Tests pass the EXACT list they want
+ *     accepted — mirroring how Ollama's real `OLLAMA_ORIGINS` env
+ *     works (it's a literal allowlist, not a hostname match).
  *   - "reject-all": every request returns 403 (lets us prove the
  *     server's CORS check is actually being exercised).
  *
@@ -81,9 +88,11 @@ async function startFakeOllamaServer(initialMode: RejectMode): Promise<FakeOllam
         const userAgent = req.headers["user-agent"] as string | undefined
         requests.push({ origin, userAgent, body })
 
-        // Mimic Ollama's CORS check.
+        // Mimic Ollama's CORS check: literal allowlist match.
         const allow =
-          mode.kind === "accept-same-origin" && origin === mode.selfOrigin
+          mode.kind === "accept-origins" &&
+          origin !== undefined &&
+          mode.allowedOrigins.includes(origin)
         if (!allow) {
           res.statusCode = 403
           res.setHeader("Content-Type", "text/plain")
@@ -133,16 +142,18 @@ const TEST_TIMEOUT_MS = 30_000
 
 describe("streamChat against a fake Ollama server (real TCP)", () => {
   it(
-    "sends Origin = same-origin so Ollama's CORS check passes (regardless of OLLAMA_ORIGINS / version)",
+    "sends Origin = http://localhost so Ollama's CORS check passes (regardless of OLLAMA_ORIGINS / version)",
     async () => {
+      // The server is bound to 127.0.0.1:<random>, but we configure its
+      // allowlist to accept what the production code ACTUALLY sends:
+      // `http://localhost`. This mirrors how Ollama's real default
+      // `OLLAMA_ORIGINS` works — a literal-string allowlist that
+      // includes `http://localhost`.
       const server = await startFakeOllamaServer({
-        kind: "accept-same-origin",
-        selfOrigin: "", // set after we know the URL
+        kind: "accept-origins",
+        allowedOrigins: [LOCAL_LLM_ORIGIN],
       })
       try {
-        // selfOrigin must equal the server's own root URL.
-        server.setRejectMode({ kind: "accept-same-origin", selfOrigin: server.url })
-
         const cfg: LlmConfig = {
           provider: "ollama",
           apiKey: "",
@@ -176,8 +187,9 @@ describe("streamChat against a fake Ollama server (real TCP)", () => {
 
         const reqs = server.receivedRequests()
         expect(reqs).toHaveLength(1)
-        // Bytes-on-wire assertion: our explicit Origin made it through.
-        expect(reqs[0].origin).toBe(server.url)
+        // Bytes-on-wire assertion: our explicit Origin made it through,
+        // AND it matches what the production code promises to send.
+        expect(reqs[0].origin).toBe(LOCAL_LLM_ORIGIN)
         // Body is the OpenAI-shape JSON we'd expect.
         const parsed = JSON.parse(reqs[0].body) as { model: string; messages: unknown[] }
         expect(parsed.model).toBe("llama3")
@@ -193,12 +205,12 @@ describe("streamChat against a fake Ollama server (real TCP)", () => {
     "the fake server's CORS check actually rejects mismatched origins (proves the test isn't trivially green)",
     async () => {
       // Sanity check: if our Origin override regressed, the server
-      // would reject. We force a wrong-origin scenario by setting the
-      // server to "accept only http://something-else" and confirming
+      // would reject. We force a wrong-origin scenario by configuring
+      // the server to accept only an impossible origin and confirming
       // that streamChat surfaces a 4xx error.
       const server = await startFakeOllamaServer({
-        kind: "accept-same-origin",
-        selfOrigin: "http://impossible-mismatch.test",
+        kind: "accept-origins",
+        allowedOrigins: ["http://impossible-mismatch.test"],
       })
       try {
         const cfg: LlmConfig = {
@@ -236,7 +248,7 @@ describe("streamChat against a fake Ollama server (real TCP)", () => {
         // The request DID reach the server with our Origin — the 403
         // was generated by the server's allowlist mismatch, not a
         // pre-flight failure or network error.
-        expect(reqs[0].origin).toBe(server.url)
+        expect(reqs[0].origin).toBe(LOCAL_LLM_ORIGIN)
       } finally {
         await server.close()
       }
@@ -245,19 +257,17 @@ describe("streamChat against a fake Ollama server (real TCP)", () => {
   )
 
   it(
-    "custom OpenAI-compat endpoint (LM Studio / llama.cpp) also sends Origin = same-origin",
+    "custom OpenAI-compat endpoint (LM Studio / llama.cpp) also sends Origin = http://localhost",
     async () => {
+      // LM Studio / llama.cpp don't check Origin at all in practice;
+      // we model that as "accept the production constant". The point of
+      // this test is the wire-level assertion: the custom-provider
+      // branch also forwards our Origin override (not just ollama).
       const server = await startFakeOllamaServer({
-        kind: "accept-same-origin",
-        selfOrigin: "",
+        kind: "accept-origins",
+        allowedOrigins: [LOCAL_LLM_ORIGIN],
       })
       try {
-        // The custom branch builds the URL by appending /chat/completions
-        // to customEndpoint. Our same-origin Origin is derived from the
-        // base URL, NOT the full /chat/completions path — but URL.origin
-        // strips the path anyway.
-        server.setRejectMode({ kind: "accept-same-origin", selfOrigin: server.url })
-
         const cfg: LlmConfig = {
           provider: "custom",
           apiKey: "",
@@ -285,7 +295,7 @@ describe("streamChat against a fake Ollama server (real TCP)", () => {
 
         expect(state.error).toBeNull()
         expect(state.done).toBe(true)
-        expect(server.receivedRequests()[0].origin).toBe(server.url)
+        expect(server.receivedRequests()[0].origin).toBe(LOCAL_LLM_ORIGIN)
       } finally {
         await server.close()
       }
