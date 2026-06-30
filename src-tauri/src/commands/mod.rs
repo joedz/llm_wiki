@@ -6,6 +6,7 @@ pub mod code_wiki_architecture;
 pub mod code_wiki_assembler;
 pub mod code_wiki_dashboard;
 pub mod code_wiki_batcher;
+pub mod code_wiki_diff;
 pub mod code_wiki_ignore;
 pub mod code_wiki_pipeline;
 pub mod code_wiki_reviewer;

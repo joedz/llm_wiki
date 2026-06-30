@@ -27,6 +27,7 @@ const PROTECTED_PATHS: &[&str] = &[
     "/knowledge-graph.json",
     "/meta.json",
     "/config.json",
+    "/diff-overlay.json",
 ];
 const SPATIAL_FILE_FALLBACK: &str = "/index.html";
 const BIND_HOST: &str = "127.0.0.1";
@@ -256,6 +257,19 @@ fn serve_dashboard(
                     let body =
                         br#"{"autoUpdate":false,"outputLanguage":"en"}"#.to_vec();
                     respond_with(request, 200, mime_for("config.json"), body);
+                }
+                "/diff-overlay.json" => {
+                    let file = project_path
+                        .join("wiki")
+                        .join("code_wiki")
+                        .join(&repo_name)
+                        .join(".understand")
+                        .join("diff-overlay.json");
+                    if let Ok(bytes) = fs::read(&file) {
+                        respond_with(request, 200, mime_for("diff-overlay.json"), bytes);
+                    } else {
+                        respond_status(request, 404, "diff-overlay.json not found");
+                    }
                 }
                 _ => respond_status(request, 404, "not found"),
             }

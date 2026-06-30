@@ -200,7 +200,7 @@ fn emit(app: &AppHandle, event: &ProgressEvent) {
     let _ = app.emit(PIPELINE_EVENT, event);
 }
 
-fn understand_dir_for(repo_dir: &std::path::Path) -> PathBuf {
+pub fn understand_dir_for(repo_dir: &std::path::Path) -> PathBuf {
     repo_dir.join(UNDERSTAND_DIR)
 }
 
@@ -743,8 +743,20 @@ async fn run_pipeline_orchestrator(
         tour_step_count: graph.tour.len() as u32,
         duration_ms: started.elapsed().as_millis() as u64,
         cancelled: false,
-        warnings,
+        warnings: warnings.clone(),
     };
+
+    // Auto-refresh the diff overlay so the dashboard's diff view
+    // is up-to-date. Best-effort: failures don't block the
+    // "Done" event.
+    if let Err(e) = crate::commands::code_wiki_diff::refresh_diff_overlay_inner(
+        &project_root,
+        repo_name,
+        None,
+    ) {
+        eprintln!("[code-wiki pipeline] diff overlay refresh failed: {e}");
+    }
+
     emit(
         app,
         &ProgressEvent::Done {

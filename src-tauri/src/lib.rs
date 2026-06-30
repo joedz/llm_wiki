@@ -255,6 +255,8 @@ pub fn run() {
             commands::code_wiki_dashboard::code_wiki_list_dashboards,
             commands::code_wiki_pipeline::code_wiki_run_pipeline,
             commands::code_wiki_pipeline::code_wiki_cancel_pipeline,
+            commands::code_wiki_diff::code_wiki_refresh_diff_overlay,
+            commands::code_wiki_diff::code_wiki_get_diff_overlay,
             commands::file_sync::start_project_file_watcher,
             commands::file_sync::stop_project_file_watcher,
             commands::file_sync::rescan_project_files,
