@@ -7,6 +7,7 @@ import { searchWiki, tokenizeQuery, type SearchResult } from "@/lib/search"
 import { resolveSearchConfig, webSearch, type WebSearchResult } from "@/lib/web-search"
 import { buildCodeAnalysisContext, type CodeAnalysisContext } from "./code-analysis"
 import { readIndex as readCodeWikiIndex, readKnowledgeGraph as readCodeWikiGraph, queryGraph } from "@/lib/code-wiki"
+import type { CodeRelationship, CodeReference, CodeSnippet } from "@/lib/code-wiki/types"
 import type { ChatRuntimeConfig } from "./chat-runtime-config"
 
 export interface ChatReference {
@@ -242,9 +243,9 @@ async function buildCodeWikiOrFallbackContext(
   try {
     const index = await readCodeWikiIndex(projectPath)
     if (index.repos.length > 0) {
-      const snippets: CodeAnalysisContext["snippets"] = []
-      const relationships: CodeAnalysisContext["relationships"] = []
-      const references: CodeAnalysisContext["references"] = []
+      const snippets: CodeSnippet[] = []
+      const relationships: CodeRelationship[] = []
+      const references: CodeReference[] = []
       let totalChars = 0
       const perRepoBudget = Math.max(2_000, Math.floor(maxContextSize / index.repos.length))
       for (const repo of index.repos) {

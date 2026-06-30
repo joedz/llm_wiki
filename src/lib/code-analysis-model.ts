@@ -1,5 +1,14 @@
 import { getFileName, normalizePath } from "@/lib/path-utils"
 
+// The chat retrieval types `CodeSnippet`, `CodeRelationship`, and
+// `CodeReference` are owned by `./code-wiki/types.ts` (the source of
+// truth: it has the wider unions that describe every call-site's runtime
+// values, including `graph-query.ts` which assigns `reason: "match"`).
+// Re-export them here so existing imports of these names through
+// `./code-analysis-model` keep compiling.
+import type { CodeRelationship, CodeReference, CodeSnippet } from "./code-wiki/types"
+export type { CodeSnippet, CodeRelationship, CodeReference } from "./code-wiki/types"
+
 export const RAW_CODE_ROOT = "raw/code"
 export const CODE_TRUNCATION_SUFFIX = "\n[...truncated...]"
 
@@ -32,61 +41,35 @@ const CODE_EXTENSIONS = new Set([
 
 const QUERY_SYMBOL = /[A-Za-z_$][\w$]{2,}/g
 
-export interface CodeSnippet {
-  readonly filePath: string
-  readonly symbolName: string
-  readonly language: string
-  readonly content: string
-  readonly startLine: number
-  readonly endLine: number
-  readonly reason: "symbol-match" | "caller" | "file-match" | "project-overview"
-}
-
-export interface CodeRelationship {
-  readonly type: "calls"
-  readonly source: string
-  readonly target: string
-  readonly sourcePath: string
-  readonly targetPath: string
-  readonly line: number
-}
-
-export interface CodeReference {
-  readonly title: string
-  readonly path: string
-  readonly kind: "code"
-  readonly snippet: string
-}
-
 export interface CodeAnalysisContext {
-  readonly snippets: readonly CodeSnippet[]
-  readonly relationships: readonly CodeRelationship[]
-  readonly references: readonly CodeReference[]
+  snippets: CodeSnippet[]
+  relationships: CodeRelationship[]
+  references: CodeReference[]
 }
 
 export interface BuildCodeAnalysisContextInput {
-  readonly projectPath: string
-  readonly message: string
-  readonly maxContextSize?: number
+  projectPath: string
+  message: string
+  maxContextSize?: number
 }
 
 export interface CodeSymbol {
-  readonly name: string
-  readonly filePath: string
-  readonly absPath: string
-  readonly language: string
-  readonly content: string
-  readonly startLine: number
-  readonly endLine: number
+  name: string
+  filePath: string
+  absPath: string
+  language: string
+  content: string
+  startLine: number
+  endLine: number
 }
 
 export interface CodeFile {
-  readonly absPath: string
-  readonly relPath: string
-  readonly language: string
-  readonly content: string
-  readonly lines: readonly string[]
-  readonly symbols: readonly CodeSymbol[]
+  absPath: string
+  relPath: string
+  language: string
+  content: string
+  lines: readonly string[]
+  symbols: readonly CodeSymbol[]
 }
 
 export function isCodeSourceExtension(path: string): boolean {
