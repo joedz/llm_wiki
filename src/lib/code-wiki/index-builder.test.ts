@@ -8,7 +8,7 @@ vi.mock("@/commands/fs", () => ({
 }))
 
 import { fileExists, readFile, writeFile, createDirectory } from "@/commands/fs"
-import { writeKnowledgeGraph, writeIndex } from "./wiki-storage"
+import { writeKnowledgeGraph } from "./wiki-storage"
 import { buildIndex } from "./index-builder"
 import type { KnowledgeGraph } from "./types"
 

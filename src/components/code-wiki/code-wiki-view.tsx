@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { invoke } from "@tauri-apps/api/core"
-import { open as openExternal } from "@tauri-apps/plugin-opener"
+import { openUrl as openExternal } from "@tauri-apps/plugin-opener"
 import {
   Code2,
   RefreshCw,
@@ -18,7 +18,6 @@ import { useWikiStore } from "@/stores/wiki-store"
 import { usePipelineStore } from "@/stores/code-wiki-pipeline-store"
 import { startPipeline, llmSpecFromConfig, hasLlmConfig } from "@/lib/code-wiki/pipeline"
 import {
-  getDiffOverlay,
   refreshDiffOverlay,
   isOverlayInteresting,
   type DiffOverlay,
@@ -111,6 +110,10 @@ export function CodeWikiView() {
   }, [refresh])
 
   // When the project switches, clear cached diffs.
+  // `projectPath` is declared further down; lift it here so the
+  // effect dependency is defined before use (TDZ triggers TS2448
+  // + TS2454 under strict tsc).
+  const projectPath = project ? normalizePath(project.path) : ""
   useEffect(() => {
     setDiffByRepo({})
   }, [projectPath])
@@ -168,7 +171,7 @@ export function CodeWikiView() {
       const llmConfig = useWikiStore.getState().llmConfig
       const llm = llmSpecFromConfig(llmConfig)
       try {
-        await startPipeline(projectPath, repoName, llm)
+        await startPipeline(projectPath, repoName, llm ?? undefined)
       } catch (err) {
         // Surface the error via a synthetic warning event so the
         // progress panel reflects the failure rather than hanging
@@ -232,7 +235,6 @@ export function CodeWikiView() {
     }
   }, [openStates])
 
-  const projectPath = project ? normalizePath(project.path) : ""
   const summary = useMemo(() => {
     const total = repos.length
     const built = repos.filter((r) => r.lastAnalyzedAt).length

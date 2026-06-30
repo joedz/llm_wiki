@@ -83,16 +83,6 @@ export function SourcesView() {
     loadSources()
   }, [loadSources, dataVersion])
 
-  async function handleBuildCodeGraph() {
-    // The "Build code graph" button moved to the new CodeWikiView page,
-    // where per-repo state (last build, dashboard URL, build errors) is
-    // surfaced alongside the action. The button here was a hidden
-    // re-entry point that built every repo on every click — easy to
-    // hit by accident and hard to know what failed. If the user opens
-    // the CodeWikiView for the first time, the empty state calls
-    // detectRepos() + buildGraphForRepo() for any unbuilt repos.
-  }
-
   async function handleRefreshSources() {
     if (!project || refreshing) return
     setRefreshing(true)

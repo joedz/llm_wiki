@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { hasLlmConfig, llmSpecFromConfig, type LlmRequestSpec } from "./pipeline"
+import { hasLlmConfig, llmSpecFromConfig } from "./pipeline"
 
 describe("llmSpecFromConfig", () => {
   it("returns null when config is missing", () => {

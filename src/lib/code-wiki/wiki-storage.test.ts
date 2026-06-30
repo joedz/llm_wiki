@@ -14,11 +14,9 @@ import { fileExists, readFile, writeFile, createDirectory } from "@/commands/fs"
 import {
   knowledgeGraphPathFor,
   readKnowledgeGraph,
-  readIndex,
-  readMeta,
   repoRootFor,
-  writeKnowledgeGraph,
   writeIndex,
+  writeKnowledgeGraph,
   writeMeta,
   WIKI_CODE_ROOT,
   type AnalysisMeta,

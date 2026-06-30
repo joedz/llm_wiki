@@ -61,7 +61,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
       // Stash the unlisten on every entry so cleanup can fire.
       // (In practice the subscription is per-app so we don't
       // bother per-entry; the function is a no-op now.)
-      const _ = unlisten
+      void unlisten
     })
   },
   ensureRunning: (projectPath) => {

@@ -58,3 +58,11 @@ pnpm-debug.log*
 # Local tooling runtime data
 .omo/
 Understand-Anything/
+# Embedded submodule source (sibling project — pulled in via install.sh /
+# install.ps1, not committed in-tree to keep repo size sane).
+codegraph/
+# Runtime artifacts from the codegraph daemon during pipeline runs.
+.codegraph/
+# We standardize on npm + package-lock.json. pnpm lockfiles pulled in by
+# one-off tooling shouldn't pollute history.
+pnpm-lock.yaml

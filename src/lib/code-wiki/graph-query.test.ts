@@ -3,7 +3,7 @@ import { queryGraph } from "./graph-query"
 import type { KnowledgeGraph } from "./types"
 import sample from "./__fixtures__/sample-knowledge-graph.json" assert { type: "json" }
 
-const graph = sample as KnowledgeGraph
+const graph = sample as unknown as KnowledgeGraph
 
 describe("queryGraph", () => {
   it("matches a symbol by exact name and includes its callers", () => {
