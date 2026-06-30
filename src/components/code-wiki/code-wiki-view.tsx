@@ -11,11 +11,18 @@ import {
   AlertCircle,
   Clock,
   Sparkles,
+  GitCompare,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useWikiStore } from "@/stores/wiki-store"
 import { usePipelineStore } from "@/stores/code-wiki-pipeline-store"
 import { startPipeline, llmSpecFromConfig, hasLlmConfig } from "@/lib/code-wiki/pipeline"
+import {
+  getDiffOverlay,
+  refreshDiffOverlay,
+  isOverlayInteresting,
+  type DiffOverlay,
+} from "@/lib/code-wiki/diff"
 import { PipelineProgress } from "./pipeline-progress"
 import { normalizePath } from "@/lib/path-utils"
 import { useTranslation } from "react-i18next"
@@ -75,6 +82,9 @@ export function CodeWikiView() {
   const [repos, setRepos] = useState<RepoStatus[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [diffByRepo, setDiffByRepo] = useState<Record<string, DiffOverlay | null>>({})
+  const [refreshingDiff, setRefreshingDiff] = useState<string | null>(null)
+  const [openDiff, setOpenDiff] = useState<Record<string, boolean>>({})
   const [buildStates, setBuildStates] = useState<Record<string, BuildState>>({})
   const [openStates, setOpenStates] = useState<Record<string, OpenState>>({})
   const [copiedRepo, setCopiedRepo] = useState<string | null>(null)
@@ -99,6 +109,11 @@ export function CodeWikiView() {
   useEffect(() => {
     void refresh()
   }, [refresh])
+
+  // When the project switches, clear cached diffs.
+  useEffect(() => {
+    setDiffByRepo({})
+  }, [projectPath])
 
   const buildRepo = useCallback(
     async (repoName: string) => {
@@ -186,6 +201,23 @@ export function CodeWikiView() {
       }
     },
     [project, beginPipeline],
+  )
+
+  const refreshDiff = useCallback(
+    async (repoName: string) => {
+      if (!project) return
+      const projectPath = normalizePath(project.path)
+      setRefreshingDiff(repoName)
+      try {
+        const overlay = await refreshDiffOverlay(projectPath, repoName)
+        setDiffByRepo((s) => ({ ...s, [repoName]: overlay }))
+      } catch (err) {
+        setError(`Diff refresh failed for ${repoName}: ${String(err)}`)
+      } finally {
+        setRefreshingDiff(null)
+      }
+    },
+    [project],
   )
 
   const copyUrl = useCallback(async (repoName: string) => {
@@ -280,10 +312,17 @@ export function CodeWikiView() {
                 repo={repo}
                 buildState={buildStates[repo.name] ?? { kind: "idle" }}
                 openState={openStates[repo.name] ?? { kind: "idle" }}
+                diff={diffByRepo[repo.name] ?? null}
+                diffOpen={openDiff[repo.name] ?? false}
+                diffRefreshing={refreshingDiff === repo.name}
                 onBuild={() => buildRepo(repo.name)}
                 onAnalyze={() => analyzeRepo(repo.name)}
                 onOpen={() => openDashboard(repo.name)}
                 onCopyUrl={() => copyUrl(repo.name)}
+                onToggleDiff={() =>
+                  setOpenDiff((s) => ({ ...s, [repo.name]: !(s[repo.name] ?? false) }))
+                }
+                onRefreshDiff={() => refreshDiff(repo.name)}
                 copied={copiedRepo === repo.name}
               />
             ))}
@@ -311,19 +350,29 @@ function RepoRow({
   repo,
   buildState,
   openState,
+  diff,
+  diffOpen,
+  diffRefreshing,
   onBuild,
   onAnalyze,
   onOpen,
   onCopyUrl,
+  onToggleDiff,
+  onRefreshDiff,
   copied,
 }: {
   repo: RepoStatus
   buildState: BuildState
   openState: OpenState
+  diff: DiffOverlay | null
+  diffOpen: boolean
+  diffRefreshing: boolean
   onAnalyze: () => void
   onBuild: () => void
   onOpen: () => void
   onCopyUrl: () => void
+  onToggleDiff: () => void
+  onRefreshDiff: () => void
   copied: boolean
 }) {
   const { t } = useTranslation()
@@ -418,8 +467,139 @@ function RepoRow({
               )}
             </Button>
           )}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onToggleDiff}
+            disabled={!built}
+            title={t("codeWiki.diffTooltip", "Show working-tree changes vs the graph")}
+          >
+            <GitCompare className="mr-1 h-3.5 w-3.5" />
+            {diffOpen ? t("codeWiki.hideDiff", "Hide diff") : t("codeWiki.showDiff", "Diff")}
+            {diff && isOverlayInteresting(diff) && (
+              <span className="ml-1 rounded-full bg-amber-500 px-1.5 text-[10px] font-semibold text-white">
+                {diff.changedNodeIds.length + diff.affectedNodeIds.length}
+              </span>
+            )}
+          </Button>
         </div>
       </div>
+      {diffOpen && (
+        <DiffPanel
+          overlay={diff}
+          refreshing={diffRefreshing}
+          onRefresh={onRefreshDiff}
+        />
+      )}
     </li>
+  )
+}
+
+function DiffPanel({
+  overlay,
+  refreshing,
+  onRefresh,
+}: {
+  overlay: DiffOverlay | null
+  refreshing: boolean
+  onRefresh: () => void
+}) {
+  const { t } = useTranslation()
+  if (!overlay) {
+    return (
+      <div className="mt-2 rounded border bg-muted/40 p-3 text-xs text-muted-foreground">
+        {refreshing
+          ? t("codeWiki.diffLoading", "Loading diff overlay…")
+          : t("codeWiki.diffEmpty", "No overlay yet. Click refresh to compute.")}
+      </div>
+    )
+  }
+  return (
+    <div className="mt-2 rounded border bg-muted/40 p-3 text-xs">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-muted-foreground">
+          {t("codeWiki.diffBase", "Base")}: {overlay.baseBranch} ·{" "}
+          {t("codeWiki.diffGenerated", "generated")}{" "}
+          {formatRelative(overlay.generatedAt)}
+        </span>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onRefresh}
+          disabled={refreshing}
+        >
+          <RefreshCw className={`mr-1 h-3 w-3 ${refreshing ? "animate-spin" : ""}`} />
+          {t("codeWiki.diffRefresh", "Refresh")}
+        </Button>
+      </div>
+      {!isOverlayInteresting(overlay) ? (
+        <div className="text-muted-foreground">
+          {t("codeWiki.diffNothing", "No working-tree changes detected.")}
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-3">
+          <DiffColumn
+            label={t("codeWiki.diffChanged", "Changed")}
+            ids={overlay.changedNodeIds}
+            color="amber"
+          />
+          <DiffColumn
+            label={t("codeWiki.diffAffected", "Affected (1-hop)")}
+            ids={overlay.affectedNodeIds}
+            color="sky"
+          />
+        </div>
+      )}
+      {overlay.warnings.length > 0 && (
+        <div className="mt-2 text-muted-foreground">
+          {overlay.warnings.map((w, i) => (
+            <div key={i}>⚠ {w}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function DiffColumn({
+  label,
+  ids,
+  color,
+}: {
+  label: string
+  ids: string[]
+  color: "amber" | "sky"
+}) {
+  const { t } = useTranslation()
+  const dotColor = color === "amber" ? "bg-amber-500" : "bg-sky-500"
+  if (ids.length === 0) {
+    return (
+      <div>
+        <div className="mb-1 font-semibold">{label}</div>
+        <div className="text-muted-foreground">
+          {t("codeWiki.diffNone", "none")}
+        </div>
+      </div>
+    )
+  }
+  return (
+    <div>
+      <div className="mb-1 font-semibold">
+        {label} <span className="text-muted-foreground">({ids.length})</span>
+      </div>
+      <ul className="space-y-1">
+        {ids.slice(0, 12).map((id) => (
+          <li key={id} className="flex items-center gap-2 font-mono">
+            <span className={`inline-block h-1.5 w-1.5 rounded-full ${dotColor}`} />
+            <span className="truncate">{id}</span>
+          </li>
+        ))}
+        {ids.length > 12 && (
+          <li className="text-muted-foreground">
+            {t("codeWiki.diffMore", "+{n} more", { n: ids.length - 12 })}
+          </li>
+        )}
+      </ul>
+    </div>
   )
 }
