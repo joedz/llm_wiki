@@ -15,6 +15,12 @@ pub fn repo_root(project_path: &Path, repo_name: &str) -> PathBuf {
     project_path.join(WIKI_CODE_WIKI_DIR).join(repo_name)
 }
 
+/// The source code directory for a repo — where actual source files live.
+/// This is distinct from repo_root() which points to the wiki output dir.
+pub fn source_dir_for(project_path: &Path, repo_name: &str) -> PathBuf {
+    project_path.join("raw").join("code").join(repo_name)
+}
+
 /// codegraph's own DB lives next to the source files it indexed, in
 /// `raw/code/<repo>/.codegraph/`. We don't try to relocate it: the tool
 /// requires this layout (no `--db-path` flag in 0.9.x), and the hidden
@@ -47,7 +53,7 @@ pub fn is_code_wiki_public_path(rel: &str) -> bool {
     if normalized.contains("/.codegraph/") {
         return false;
     }
-    normalized.ends_with("/graph.json")
+    normalized.ends_with("/knowledge-graph.json")
         || normalized.ends_with("/meta.json")
         || normalized == "wiki/code_wiki/index.json"
 }
@@ -56,17 +62,22 @@ pub fn is_code_wiki_public_path(rel: &str) -> bool {
 pub struct RepoSummary {
     pub name: String,
     pub path: String,
+    #[serde(alias = "graphPath")]
     pub graph_path: String,
     pub languages: Vec<String>,
+    #[serde(alias = "fileCount")]
     pub file_count: u32,
+    #[serde(alias = "symbolCount")]
     pub symbol_count: u32,
     pub description: Option<String>,
+    #[serde(alias = "lastAnalyzedAt")]
     pub last_analyzed_at: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CodeWikiIndex {
     pub version: String,
+    #[serde(alias = "generatedAt")]
     pub generated_at: String,
     pub repos: Vec<RepoSummary>,
 }

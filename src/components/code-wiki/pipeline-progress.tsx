@@ -135,7 +135,7 @@ export function PipelineProgress({ projectPath }: Props) {
         <p className="mt-2 text-xs text-muted-foreground">
           {t("codeWiki.pipeline.summary", {
             defaultValue:
-              "Done in {durationMs}ms — {nodeCount} nodes, {edgeCount} edges",
+              "Done in {{durationMs}}ms — {{nodeCount}} nodes, {{edgeCount}} edges",
             durationMs: run.summary.durationMs,
             nodeCount: run.summary.nodeCount,
             edgeCount: run.summary.edgeCount,

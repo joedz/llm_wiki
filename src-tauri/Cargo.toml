@@ -67,6 +67,24 @@ walkdir = "2"
 # ships a private libsqlite so we don't depend on the host having one.
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+# Tree-sitter: native Rust AST parsing (replaces codegraph)
+tree-sitter = "0.24"
+tree-sitter-rust = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-go = "0.23"
+tree-sitter-java = "0.23"
+tree-sitter-c = "0.24"
+tree-sitter-cpp = "0.23"
+tree-sitter-json = "0.24"
+tree-sitter-yaml = "0.7"
+tree-sitter-html = "0.23"
+tree-sitter-css = "0.25"
+tree-sitter-bash = "0.25"
+tree-sitter-ruby = "0.23"
+tree-sitter-php = "0.24"
+tree-sitter-kotlin = "0.3"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
 tempfile = "3"

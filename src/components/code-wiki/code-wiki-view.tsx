@@ -162,12 +162,7 @@ export function CodeWikiView() {
     async (repoName: string) => {
       if (!project) return
       const projectPath = normalizePath(project.path)
-      // Optimistically mark the run as "started" so the UI shows
-      // a spinner immediately; the actual `started` event from Rust
-      // will replace this with the real pipelineId.
       beginPipeline(projectPath, repoName)
-      // Build the LLM spec from the chat panel's LlmConfig (or
-      // undefined to fall back to the codegraph-only M1 path).
       const llmConfig = useWikiStore.getState().llmConfig
       const llm = llmSpecFromConfig(llmConfig)
       try {

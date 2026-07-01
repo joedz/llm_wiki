@@ -33,14 +33,16 @@ interface PipelineStore {
 }
 
 const PIPELINE_PHASES = [
-  "Pre-flight",
-  "Ignore config",
-  "Scan",
-  "Batch",
-  "Analyze (no LLM)",
-  "Assemble review",
-  "Architecture + tour",
-  "Save",
+  "Pre-flight",       // 0
+  "Ignore config",    // 1
+  "Scan",             // 2
+  "Batch",            // 3
+  "Analyze (no LLM)", // 4
+  "Assemble review",  // 5
+  "Architecture + tour", // 6
+  "Tour",             // 7
+  "Review",           // 8
+  "Save",             // 9
 ]
 
 export const usePipelineStore = create<PipelineStore>((set, get) => ({
@@ -70,7 +72,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     return null
   },
   begin: (projectPath, repoName) => {
-    const pipelineId = `pipeline-local-${Date.now()}`
+    const pipelineId = projectPath
     set((s) => ({
       byProject: {
         ...s.byProject,
@@ -94,10 +96,26 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
   apply: (projectPath, event) => {
     set((s) => {
       const current = s.byProject[projectPath]
-      if (!current || current.pipelineId !== event.pipelineId) return s
-      const next: PipelineRun = { ...current }
+      const isStarted = event.kind === "started"
+      if (!current && !isStarted) return s
+      if (!isStarted && current && current.pipelineId !== event.pipelineId) return s
+      const next: PipelineRun = current ? { ...current } : {
+        pipelineId: event.pipelineId,
+        repoName: event.repoName,
+        startedAt: Date.now(),
+        currentPhase: 0,
+        currentPhaseLabel: PIPELINE_PHASES[0] ?? "Pre-flight",
+        phaseStatus: "running" as const,
+        batchDone: 0,
+        batchTotal: 0,
+        warnings: [],
+        result: "running" as const,
+        summary: null,
+        unlisten: null,
+      }
       switch (event.kind) {
         case "started":
+          next.pipelineId = event.pipelineId
           next.repoName = event.repoName
           next.currentPhase = 0
           next.currentPhaseLabel = PIPELINE_PHASES[0] ?? "Pre-flight"

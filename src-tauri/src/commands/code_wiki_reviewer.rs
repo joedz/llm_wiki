@@ -74,14 +74,8 @@ pub fn review_graph(
                 path: Some(n.id.clone()),
             });
         }
-        if n.summary.is_empty() {
-            issues.push(ReviewIssue {
-                level: "info".to_string(),
-                category: "node".to_string(),
-                message: format!("Node '{}' missing summary", n.id),
-                path: Some(n.id.clone()),
-            });
-        }
+        // NOTE: codegraph doesn't extract docstrings for Python/many compiled
+        // languages, so summary is often empty — skip silently.
         if !seen_ids.insert(n.id.clone()) {
             issues.push(ReviewIssue {
                 level: "error".to_string(),

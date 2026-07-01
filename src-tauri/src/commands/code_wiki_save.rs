@@ -13,10 +13,12 @@
 //      #301) — we don't bother with delayed-purge for v1.
 
 use std::fs;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::commands::code_wiki_pipeline::KnowledgeGraph;
 use crate::commands::code_wiki_scanner::ScannedFile;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -138,6 +140,43 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Streaming atomic write for the knowledge graph. Uses
+/// `serde_json::to_writer_pretty` against a `BufWriter<File>` so
+/// the entire serialized JSON never sits in a single `Vec<u8>` —
+/// important once sub-file nodes are emitted and the graph
+/// easily exceeds 50 MB pretty-printed (a Rust `Vec<u8>` of that
+/// size spikes heap by ×1.5 during construction).
+///
+/// Semantics match `write_atomic`: temp file in the same
+/// directory, fsync, then `rename` into place.
+pub fn write_graph_streaming(path: &Path, graph: &KnowledgeGraph) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension(format!(
+        "{}.tmp",
+        path.extension().and_then(|s| s.to_str()).unwrap_or("")
+    ));
+    {
+        let file = fs::File::create(&tmp)?;
+        let mut writer = BufWriter::new(file);
+        // Pretty printing streams just like the in-memory variant
+        // — serde_json's pretty printer writes through any `io::Write`.
+        serde_json::to_writer_pretty(&mut writer, graph).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+        })?;
+        writer.flush()?;
+    }
+    if let Ok(f) = fs::File::open(&tmp) {
+        let _ = f.sync_all();
+    }
+    if fs::rename(&tmp, path).is_err() {
+        let _ = fs::remove_file(path);
+        fs::rename(&tmp, path)?;
+    }
+    Ok(())
+}
+
 fn now_iso() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let dur = SystemTime::now()
@@ -240,6 +279,91 @@ mod tests {
         write_atomic(&path, b"v2").unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, "v2");
+    }
+
+    /// Round-trip a (modestly sized) `KnowledgeGraph` through the
+    /// streaming writer. Validates that the on-disk JSON has the
+    /// same node + edge counts and that the file is parseable as
+    /// JSON. The point isn't a memory benchmark — it's a smoke
+    /// test that we don't accidentally drop fields when
+    /// `to_writer_pretty` builds the document incrementally.
+    #[test]
+    fn write_graph_streaming_round_trip() {
+        use crate::commands::code_wiki_pipeline::{GraphEdge, GraphNode, NodeLocation, ProjectMeta};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kg.json");
+
+        let mut nodes: Vec<GraphNode> = (0..100)
+            .map(|i| GraphNode {
+                id: format!("file:src/f{i}.ts"),
+                kind: "file".to_string(),
+                name: format!("f{i}.ts"),
+                file_path: format!("src/f{i}.ts"),
+                summary: String::new(),
+                tags: vec![],
+                complexity: "moderate".to_string(),
+                location: None,
+                language_notes: None,
+            })
+            .collect();
+        nodes.push(GraphNode {
+            id: "class:src/foo.ts:Foo".to_string(),
+            kind: "class".to_string(),
+            name: "Foo".to_string(),
+            file_path: "src/foo.ts".to_string(),
+            summary: String::new(),
+            tags: vec![],
+            complexity: "moderate".to_string(),
+            location: Some(NodeLocation { start_line: 1, end_line: 50 }),
+            language_notes: None,
+        });
+        nodes.push(GraphNode {
+            id: "function:src/foo.ts:Foo.bar".to_string(),
+            kind: "function".to_string(),
+            name: "bar".to_string(),
+            file_path: "src/foo.ts".to_string(),
+            summary: String::new(),
+            tags: vec![],
+            complexity: "moderate".to_string(),
+            location: Some(NodeLocation { start_line: 5, end_line: 20 }),
+            language_notes: None,
+        });
+        let edges: Vec<GraphEdge> = (0..99)
+            .map(|i| GraphEdge {
+                source: format!("file:src/f{i}.ts"),
+                target: "class:src/foo.ts:Foo".to_string(),
+                kind: "contains".to_string(),
+                direction: "forward".to_string(),
+                weight: 1.0,
+            })
+            .collect();
+
+        let graph = KnowledgeGraph {
+            version: "1.0.0".to_string(),
+            kind: "codebase".to_string(),
+            project: ProjectMeta {
+                name: "demo".to_string(),
+                languages: vec!["typescript".to_string()],
+                frameworks: vec![],
+                description: "demo".to_string(),
+                analyzed_at: "2026-07-02T00:00:00.000Z".to_string(),
+                git_commit_hash: "deadbeef".to_string(),
+            },
+            nodes,
+            edges,
+            layers: vec![],
+            tour: vec![],
+        };
+
+        write_graph_streaming(&path, &graph).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let parsed: KnowledgeGraph = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed.nodes.len(), graph.nodes.len());
+        assert_eq!(parsed.edges.len(), graph.edges.len());
+        assert_eq!(parsed.kind, "codebase");
+        // No leftover .tmp
+        let tmp = path.with_extension("json.tmp");
+        assert!(!tmp.exists(), ".tmp file leaked: {}", tmp.display());
     }
 
     #[test]

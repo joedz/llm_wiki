@@ -13,6 +13,7 @@ pub mod code_wiki_reviewer;
 pub mod code_wiki_save;
 pub mod code_wiki_scanner;
 pub mod code_wiki_tour;
+pub mod code_wiki_tree_sitter;
 pub mod codex_cli;
 pub mod extract_images;
 pub mod file_sync;

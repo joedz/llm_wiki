@@ -20,15 +20,16 @@ use tauri::{AppHandle, Emitter};
 use tokio::task;
 
 use crate::commands::code_wiki::{
-    run_get_graph_payload_inner, run_indexer_inner, repo_root, GRAPH_FILE, META_FILE,
+    repo_root, source_dir_for, GRAPH_FILE, META_FILE,
 };
+use crate::commands::code_wiki_tree_sitter::build_graph_via_tree_sitter;
 use crate::commands::code_wiki_analyzer::{analyze_batch as analyze_one_batch, FileEnrichment};
 use crate::commands::code_wiki_architecture::{assign_layers, ArchitectureReport, Layer};
 use crate::commands::code_wiki_assembler::assemble;
 use crate::commands::code_wiki_batcher::{plan_batches_inner, write_batches_plan, BatchEntry};
 use crate::commands::code_wiki_ignore::generate_understandignore_inner;
 use crate::commands::code_wiki_reviewer::review_graph;
-use crate::commands::code_wiki_save::{write_atomic, write_fingerprints};
+use crate::commands::code_wiki_save::{write_atomic, write_fingerprints, write_graph_streaming};
 use crate::commands::code_wiki_scanner::{scan_project_inner, ScanResult};
 use crate::commands::code_wiki_tour::{build_tour, TourStep};
 use crate::llm_client::{LlmProvider, LlmRequest};
@@ -61,11 +62,12 @@ pub struct PipelineConfig {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LlmRequestSpec {
     pub provider: String, // "anthropic" | "openai" | "ollama" | "custom"
+    #[serde(alias = "apiKey")]
     pub api_key: String,
     pub model: String,
-    #[serde(default)]
+    #[serde(default, alias = "baseUrl")]
     pub base_url: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "maxTokens")]
     pub max_tokens: Option<u32>,
     #[serde(default)]
     pub temperature: Option<f32>,
@@ -104,6 +106,7 @@ impl Default for PipelineConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct PipelineSummary {
     pub pipeline_id: String,
     pub project_path: String,
@@ -305,74 +308,11 @@ fn codegraph_edge_to_ua(kind: &str) -> Option<&'static str> {
         "contains" => "contains",
         "imports" => "imports",
         "calls" => "calls",
+        "inherits" => "inherits",
+        "implements" => "implements",
+        "exports" => "exports",
         _ => return None,
     })
-}
-
-fn build_ua_graph(
-    repo_name: &str,
-    scan_languages: &[String],
-    scan_frameworks: &[String],
-    scan_description: &str,
-    git_commit_hash: &str,
-    payload_nodes: &[crate::commands::code_wiki::CodegraphContextNode],
-    payload_edges: &[crate::commands::code_wiki::CodegraphContextEdge],
-) -> KnowledgeGraph {
-    let mut nodes: Vec<GraphNode> = Vec::new();
-    for raw in payload_nodes {
-        let Some(ua_kind) = codegraph_to_ua_kind(&raw.kind) else { continue };
-        let file_path = if raw.file_path.is_empty() { String::new() } else { raw.file_path.clone() };
-        let location = raw.location.as_ref().map(|l| NodeLocation {
-            start_line: l.start_line,
-            end_line: l.end_line,
-        });
-        nodes.push(GraphNode {
-            id: raw.id.clone(),
-            kind: ua_kind.to_string(),
-            name: raw.name.clone(),
-            file_path,
-            summary: raw.docstring.clone().unwrap_or_default(),
-            tags: raw.tags.clone(),
-            complexity: "moderate".to_string(),
-            location,
-            language_notes: raw.language.clone(),
-        });
-    }
-    nodes.sort_by(|a, b| a.id.cmp(&b.id));
-
-    let mut edges: Vec<GraphEdge> = Vec::new();
-    for raw in payload_edges {
-        let Some(ua_kind) = codegraph_edge_to_ua(&raw.kind) else { continue };
-        edges.push(GraphEdge {
-            source: raw.source.clone(),
-            target: raw.target.clone(),
-            kind: ua_kind.to_string(),
-            direction: "forward".to_string(),
-            weight: 1.0,
-        });
-    }
-    edges.sort_by(|a, b| a.source.cmp(&b.source).then(a.target.cmp(&b.target)));
-
-    let mut languages: Vec<String> = scan_languages.to_vec();
-    languages.sort();
-    languages.dedup();
-
-    KnowledgeGraph {
-        version: "1.0.0".to_string(),
-        kind: "codebase".to_string(),
-        project: ProjectMeta {
-            name: repo_name.to_string(),
-            languages,
-            frameworks: scan_frameworks.to_vec(),
-            description: scan_description.to_string(),
-            analyzed_at: now_iso(),
-            git_commit_hash: git_commit_hash.to_string(),
-        },
-        nodes,
-        edges,
-        layers: Vec::new(),
-        tour: Vec::new(),
-    }
 }
 
 // --- Pipeline execution -------------------------------------------------
@@ -400,7 +340,7 @@ pub async fn code_wiki_run_pipeline(
     tokio::spawn(async move {
         let result = run_pipeline(app_for_task, registry, project_path, repo_name, llm).await;
         if let Err(e) = result {
-            eprintln!("[code-wiki pipeline] failed: {e}");
+            eprintln!("[code-wiki pipeline] run_pipeline failed: {e}");
         }
     });
     Ok(())
@@ -423,7 +363,10 @@ pub async fn run_pipeline(
     repo_name: String,
     llm: Option<LlmRequestSpec>,
 ) -> Result<PipelineSummary, String> {
-    let pipeline_id = registry.new_id();
+    // Use project_path as the stable pipelineId — it must match what the
+    // frontend store sets in begin() so all events (phase/batch/done) are
+    // correctly routed to the right UI entry.
+    let pipeline_id = project_path.clone();
     let cancel = registry.register_cancel(&pipeline_id);
 
     let app_for_task = app.clone();
@@ -459,12 +402,13 @@ async fn run_pipeline_orchestrator(
     started: Instant,
 ) -> Result<PipelineSummary, String> {
     let started = started;
+    eprintln!("[pipeline:orch] run_pipeline_orchestrator START id={} project={} repo={}", pipeline_id, project_path, repo_name);
     emit(
         app,
         &ProgressEvent::Started {
             pipeline_id: pipeline_id.to_string(),
             repo_name: repo_name.to_string(),
-            total_phases: 7,
+            total_phases: 10,
         },
     );
 
@@ -473,9 +417,15 @@ async fn run_pipeline_orchestrator(
     if !project_root.is_dir() {
         return Err(format!("project path is not a directory: {project_path}"));
     }
+    // repo_dir = output directory for knowledge-graph.json / .understand/
     let repo_dir = repo_root(&project_root, repo_name);
     if !repo_dir.is_dir() {
-        return Err(format!("repo not found: {}", repo_dir.display()));
+        return Err(format!("repo output dir not found: {}", repo_dir.display()));
+    }
+    // source_dir = actual source code to be analyzed
+    let source_dir = source_dir_for(&project_root, repo_name);
+    if !source_dir.is_dir() {
+        return Err(format!("source code dir not found: {} (checked raw/code/{})", source_dir.display(), repo_name));
     }
     let understand_dir = understand_dir_for(&repo_dir);
     std::fs::create_dir_all(&understand_dir).map_err(|e| format!("mkdir .understand: {e}"))?;
@@ -504,7 +454,7 @@ async fn run_pipeline_orchestrator(
         return Ok(cancelled_summary(pipeline_id, project_path, repo_name, started, &warnings));
     }
     emit_phase(app, pipeline_id, 2, "Scan", "running");
-    let scan = match scan_project_inner(&repo_dir) {
+    let scan = match scan_project_inner(&source_dir) {
         Ok(s) => s,
         Err(e) => {
             let msg = format!("scan failed: {e}");
@@ -551,14 +501,14 @@ async fn run_pipeline_orchestrator(
     let phase2_label = if llm.is_some() { "Analyze (LLM)" } else { "Analyze (no LLM)" };
     emit_phase(app, pipeline_id, 4, phase2_label, "running");
 
-    let mut graph = match build_ua_graph_via_codegraph(
+    let mut graph = match build_graph_via_tree_sitter(
         &project_root,
         repo_name,
         &scan,
     ) {
         Ok(g) => g,
         Err(e) => {
-            let msg = format!("phase 2 codegraph build failed: {e}");
+            let msg = format!("phase 2 tree-sitter build failed: {e}");
             emit_warning(app, pipeline_id, 4, &msg);
             return Err(msg);
         }
@@ -584,7 +534,7 @@ async fn run_pipeline_orchestrator(
         match run_phase2_llm(
             app,
             pipeline_id,
-            &project_root,
+            &source_dir,
             &scan,
             &runnable_batches,
             runnable_total,
@@ -605,11 +555,11 @@ async fn run_pipeline_orchestrator(
     }
     emit_phase(app, pipeline_id, 4, phase2_label, "done");
 
-    // --- Phase 3: assemble (dedup, validate, normalize) ---
+    // --- Phase 5: assemble (dedup, validate, normalize) ---
     if check_cancel(cancel) {
         return Ok(cancelled_summary(pipeline_id, project_path, repo_name, started, &warnings));
     }
-    emit_phase(app, pipeline_id, 3, "Assemble", "running");
+    emit_phase(app, pipeline_id, 5, "Assemble", "running");
     let (graph, asm_report) = assemble(graph);
     if asm_report.nodes_deduped > 0
         || asm_report.edges_deduped > 0
@@ -626,16 +576,16 @@ async fn run_pipeline_orchestrator(
             asm_report.complexity_normalized,
         );
         warnings.push(msg.clone());
-        emit_warning(app, pipeline_id, 3, &msg);
+        emit_warning(app, pipeline_id, 5, &msg);
     }
-    emit_phase(app, pipeline_id, 3, "Assemble", "done");
+    emit_phase(app, pipeline_id, 5, "Assemble", "done");
 
-    // --- Phase 4: architecture (assign layers) ---
+    // --- Phase 6: architecture (assign layers) ---
     let mut graph = graph;
     if check_cancel(cancel) {
         return Ok(cancelled_summary(pipeline_id, project_path, repo_name, started, &warnings));
     }
-    emit_phase(app, pipeline_id, 4, "Architecture", "running");
+    emit_phase(app, pipeline_id, 6, "Architecture", "running");
     let arch_report: ArchitectureReport = assign_layers(&graph);
     graph.layers = arch_report.layers.clone();
     if arch_report.unassigned > 0 {
@@ -644,27 +594,27 @@ async fn run_pipeline_orchestrator(
             arch_report.unassigned
         );
         warnings.push(msg.clone());
-        emit_warning(app, pipeline_id, 4, &msg);
+        emit_warning(app, pipeline_id, 6, &msg);
     }
-    emit_phase(app, pipeline_id, 4, "Architecture", "done");
+    emit_phase(app, pipeline_id, 6, "Architecture", "done");
 
-    // --- Phase 5: tour (build guided walkthrough) ---
+    // --- Phase 7: tour (build guided walkthrough) ---
     if check_cancel(cancel) {
         return Ok(cancelled_summary(pipeline_id, project_path, repo_name, started, &warnings));
     }
-    emit_phase(app, pipeline_id, 5, "Tour", "running");
+    emit_phase(app, pipeline_id, 7, "Tour", "running");
     let tour_report = build_tour(&graph);
     graph.tour = tour_report.steps.clone();
     if tour_report.truncated {
         warnings.push("Tour was truncated to MAX_STEPS".to_string());
     }
-    emit_phase(app, pipeline_id, 5, "Tour", "done");
+    emit_phase(app, pipeline_id, 7, "Tour", "done");
 
-    // --- Phase 6: review (deterministic validation) ---
+    // --- Phase 8: review (deterministic validation) ---
     if check_cancel(cancel) {
         return Ok(cancelled_summary(pipeline_id, project_path, repo_name, started, &warnings));
     }
-    emit_phase(app, pipeline_id, 6, "Review", "running");
+    emit_phase(app, pipeline_id, 8, "Review", "running");
     let review = review_graph(&graph, &graph.layers, &graph.tour);
     let error_count = review.issues.iter().filter(|i| i.level == "error").count();
     let warning_count = review.issues.iter().filter(|i| i.level == "warning").count();
@@ -674,7 +624,7 @@ async fn run_pipeline_orchestrator(
             error_count, warning_count
         );
         warnings.push(msg.clone());
-        emit_warning(app, pipeline_id, 6, &msg);
+        emit_warning(app, pipeline_id, 8, &msg);
     }
     // Embed stats as a `stats` top-level field on the final graph
     // (UA's `knowledge-graph.json` carries stats inline).
@@ -683,16 +633,16 @@ async fn run_pipeline_orchestrator(
     // Write stats via a separate field on the project.
     // For M3 we serialize stats into meta.json below; the
     // knowledge-graph.json keeps its existing layout.
-    emit_phase(app, pipeline_id, 6, "Review", "done");
+    emit_phase(app, pipeline_id, 8, "Review", "done");
     // Suppress unused-variable warning when stats embedding is
     // not yet wired into the graph struct.
     let _ = stats_value;
 
-    // --- Phase 7 ---
+    // --- Phase 9 ---
     if check_cancel(cancel) {
         return Ok(cancelled_summary(pipeline_id, project_path, repo_name, started, &warnings));
     }
-    emit_phase(app, pipeline_id, 7, "Save", "running");
+    emit_phase(app, pipeline_id, 9, "Save", "running");
     let fp_path = match write_fingerprints(
         &project_root,
         &understand_dir,
@@ -702,16 +652,14 @@ async fn run_pipeline_orchestrator(
         Ok(p) => p,
         Err(e) => {
             warnings.push(format!("fingerprints failed: {e}"));
-            emit_warning(app, pipeline_id, 7, &warnings.last().unwrap());
+            emit_warning(app, pipeline_id, 9, &warnings.last().unwrap());
             understand_dir.join(FINGERPRINTS_FILE)
         }
     };
     let graph_path = repo_dir.join(GRAPH_FILE);
-    let graph_bytes = serde_json::to_vec_pretty(&graph)
-        .map_err(|e| format!("serialize graph: {e}"))?;
-    if let Err(e) = write_atomic(&graph_path, &graph_bytes) {
+    if let Err(e) = write_graph_streaming(&graph_path, &graph) {
         let msg = format!("graph write failed: {e}");
-        emit_warning(app, pipeline_id, 7, &msg);
+        emit_warning(app, pipeline_id, 9, &msg);
         return Err(msg);
     }
     let meta = serde_json::json!({
@@ -726,9 +674,9 @@ async fn run_pipeline_orchestrator(
         &serde_json::to_vec_pretty(&meta).map_err(|e| format!("serialize meta: {e}"))?,
     ) {
         warnings.push(format!("meta.json write failed: {e}"));
-        emit_warning(app, pipeline_id, 7, &warnings.last().unwrap());
+        emit_warning(app, pipeline_id, 9, &warnings.last().unwrap());
     }
-    emit_phase(app, pipeline_id, 7, "Save", "done");
+    emit_phase(app, pipeline_id, 9, "Save", "done");
 
     let summary = PipelineSummary {
         pipeline_id: pipeline_id.to_string(),
@@ -765,39 +713,6 @@ async fn run_pipeline_orchestrator(
         },
     );
     Ok(summary)
-}
-
-/// Build the UA `KnowledgeGraph` for `repo_name` by:
-///   1. Invoking the existing codegraph init+index pipeline.
-///   2. Reading the SQLite payload via the existing reader.
-///   3. Mapping nodes/edges to UA shapes.
-///   4. Filling `project.{frameworks,description,gitCommitHash,languages}`
-///      from the scanner output.
-fn build_ua_graph_via_codegraph(
-    project_root: &PathBuf,
-    repo_name: &str,
-    scan: &crate::commands::code_wiki_scanner::ScanResult,
-) -> Result<KnowledgeGraph, String> {
-    // Make sure the codegraph DB is up to date. We treat failures
-    // as recoverable (use whatever's already on disk) — UA's
-    // principle: always save partial results.
-    if let Err(e) = run_indexer_inner(project_root, repo_name) {
-        eprintln!("[code-wiki pipeline] codegraph init/index warning: {e}");
-    }
-    let payload = run_get_graph_payload_inner(project_root, repo_name)?;
-    Ok(build_ua_graph(
-        repo_name,
-        &scan.stats
-            .by_language
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>(),
-        &scan.frameworks,
-        &scan.project_description,
-        &scan.git_commit_hash,
-        &payload.nodes,
-        &payload.edges,
-    ))
 }
 
 /// Apply LLM-produced enrichments to the in-memory graph.
@@ -1062,10 +977,10 @@ mod tests {
         let e = ProgressEvent::Started {
             pipeline_id: "p2".to_string(),
             repo_name: "demo".to_string(),
-            total_phases: 7,
+            total_phases: 10,
         };
         let json = serde_json::to_string(&e).unwrap();
-        assert!(json.contains("\"totalPhases\":7"));
+        assert!(json.contains("\"totalPhases\":10"));
         assert!(json.contains("\"repoName\":\"demo\""));
     }
 
@@ -1119,31 +1034,42 @@ mod tests {
         assert_eq!(codegraph_edge_to_ua("contains"), Some("contains"));
         assert_eq!(codegraph_edge_to_ua("imports"), Some("imports"));
         assert_eq!(codegraph_edge_to_ua("calls"), Some("calls"));
+        assert_eq!(codegraph_edge_to_ua("inherits"), Some("inherits"));
+        assert_eq!(codegraph_edge_to_ua("implements"), Some("implements"));
+        assert_eq!(codegraph_edge_to_ua("exports"), Some("exports"));
         assert_eq!(codegraph_edge_to_ua("references"), None);
         assert_eq!(codegraph_edge_to_ua("related"), None);
     }
 
     #[test]
     fn knowledge_graph_serializes_camel_case() {
-        use crate::commands::code_wiki::CodegraphContextNode;
-        let node = CodegraphContextNode {
+        let node = GraphNode {
             id: "file:src/main.rs".to_string(),
             kind: "file".to_string(),
             name: "main.rs".to_string(),
             file_path: "src/main.rs".to_string(),
-            qualified_name: None,
-            language: Some("rust".to_string()),
-            summary: None,
-            signature: None,
-            docstring: None,
+            summary: String::new(),
             tags: vec![],
-            location: Some(crate::commands::code_wiki::NodeLocation { start_line: 0, end_line: 0 }),
-            is_exported: None,
-            is_async: None,
-            decorators: vec![],
-            visibility: None,
+            complexity: "moderate".to_string(),
+            location: Some(NodeLocation { start_line: 0, end_line: 0 }),
+            language_notes: None,
         };
-        let g = build_ua_graph("demo", &["rust".to_string()], &["Tauri".to_string()], "Test", "deadbeef", &[node], &[]);
+        let g = KnowledgeGraph {
+            version: "1.0.0".to_string(),
+            kind: "codebase".to_string(),
+            project: ProjectMeta {
+                name: "demo".to_string(),
+                languages: vec!["rust".to_string()],
+                frameworks: vec!["Tauri".to_string()],
+                description: "Test".to_string(),
+                analyzed_at: "2026-06-29T00:00:00.000Z".to_string(),
+                git_commit_hash: "deadbeef".to_string(),
+            },
+            nodes: vec![node],
+            edges: vec![],
+            layers: vec![],
+            tour: vec![],
+        };
         let json = serde_json::to_string(&g).unwrap();
         assert!(json.contains("\"filePath\":\"src/main.rs\""), "got: {json}");
         assert!(json.contains("\"type\":\"file\""), "got: {json}");
@@ -1348,7 +1274,7 @@ mod tests {
 
         // Build a no-op AppHandle-less invocation of the pipeline
         // orchestrator. We can't construct a real AppHandle in
-        // tests, so we exercise `build_ua_graph_via_codegraph`
+        // tests, so we exercise `build_graph_via_tree_sitter`
         // directly and assert the same on-disk layout the pipeline
         // would produce.
         let project_path = project.to_string_lossy().to_string();
@@ -1356,8 +1282,8 @@ mod tests {
         assert!(!scan.files.is_empty(), "scan returned 0 files");
         assert!(scan.git_commit_hash.len() >= 7, "git hash missing");
 
-        let graph = crate::commands::code_wiki_pipeline::build_ua_graph_via_codegraph(
-            &project,
+        let graph = crate::commands::code_wiki_tree_sitter::build_graph_via_tree_sitter(
+            &repo,
             "gglog",
             &scan,
         )

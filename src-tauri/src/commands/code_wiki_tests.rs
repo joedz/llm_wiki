@@ -29,7 +29,7 @@ fn codegraph_dir_for_lives_next_to_source() {
 
 #[test]
 fn is_code_wiki_public_path_accepts_graph_meta_index() {
-    assert!(is_code_wiki_public_path("wiki/code_wiki/repo-A/graph.json"));
+    assert!(is_code_wiki_public_path("wiki/code_wiki/repo-A/knowledge-graph.json"));
     assert!(is_code_wiki_public_path("wiki/code_wiki/index.json"));
     assert!(!is_code_wiki_public_path(
         "wiki/code_wiki/repo-A/.codegraph/codegraph.db"
