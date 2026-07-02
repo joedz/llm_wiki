@@ -16,12 +16,24 @@ mod rust_extractor;
 mod typescript_extractor;
 mod python_extractor;
 mod go_extractor;
+mod java_extractor;
+mod c_extractor;
+mod cpp_extractor;
+mod ruby_extractor;
+mod php_extractor;
+mod bash_extractor;
 
 // Re-export extractors
 pub use rust_extractor::RustExtractor;
 pub use typescript_extractor::TypeScriptExtractor;
 pub use python_extractor::PythonExtractor;
 pub use go_extractor::GoExtractor;
+pub use java_extractor::JavaExtractor;
+pub use c_extractor::CExtractor;
+pub use cpp_extractor::CppExtractor;
+pub use ruby_extractor::RubyExtractor;
+pub use php_extractor::PhpExtractor;
+pub use bash_extractor::BashExtractor;
 
 /// Language extractor trait.
 /// Mirrors UA's `LanguageExtractor` TypeScript interface.
@@ -45,6 +57,12 @@ pub fn create_extractor(lang: &str) -> Option<Arc<dyn LanguageExtractor>> {
         "typescript" | "tsx" | "javascript" | "jsx" => Some(Arc::new(TypeScriptExtractor::new())),
         "python" => Some(Arc::new(PythonExtractor::new())),
         "go" => Some(Arc::new(GoExtractor::new())),
+        "java" => Some(Arc::new(JavaExtractor::new())),
+        "c" => Some(Arc::new(CExtractor::new())),
+        "cpp" => Some(Arc::new(CppExtractor::new())),
+        "ruby" => Some(Arc::new(RubyExtractor::new())),
+        "php" => Some(Arc::new(PhpExtractor::new())),
+        "bash" | "shell" => Some(Arc::new(BashExtractor::new())),
         _ => None,
     }
 }
@@ -60,4 +78,11 @@ pub fn register_extractors(
     map.insert("jsx", Arc::new(TypeScriptExtractor::new()));
     map.insert("python", Arc::new(PythonExtractor::new()));
     map.insert("go", Arc::new(GoExtractor::new()));
+    map.insert("java", Arc::new(JavaExtractor::new()));
+    map.insert("c", Arc::new(CExtractor::new()));
+    map.insert("cpp", Arc::new(CppExtractor::new()));
+    map.insert("ruby", Arc::new(RubyExtractor::new()));
+    map.insert("php", Arc::new(PhpExtractor::new()));
+    map.insert("bash", Arc::new(BashExtractor::new()));
+    map.insert("shell", Arc::new(BashExtractor::new()));
 }
