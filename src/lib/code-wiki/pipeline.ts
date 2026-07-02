@@ -22,6 +22,18 @@ export interface PipelineSummary {
   durationMs: number
   cancelled: boolean
   warnings: string[]
+  /**
+   * Optional LLM `--review` verdict (approved/issues/warnings/
+   * narrative) — populated when the pipeline ran Phase 8.5
+   * with the `reviewLl` parameter. The dashboard surface
+   * uses `narrative` for a one-line summary.
+   */
+  reviewNarrative?: {
+    approved: boolean
+    issues: string[]
+    warnings: string[]
+    narrative: string
+  } | null
 }
 
 export type PhaseStatus = "running" | "done" | "error"
@@ -46,8 +58,14 @@ export function startPipeline(
   projectPath: string,
   repoName: string,
   llm?: LlmRequestSpec,
+  options?: { reviewLl?: LlmRequestSpec },
 ): Promise<void> {
-  return invoke("code_wiki_run_pipeline", { projectPath, repoName, llm })
+  return invoke("code_wiki_run_pipeline", {
+    projectPath,
+    repoName,
+    llm,
+    reviewLl: options?.reviewLl,
+  })
 }
 
 /**

@@ -99,9 +99,14 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
       const isStarted = event.kind === "started"
       if (!current && !isStarted) return s
       if (!isStarted && current && current.pipelineId !== event.pipelineId) return s
+      // After the two guards, reaching the `!current` branch
+      // means `isStarted` is true and `event.kind === "started"`.
+      // TS can't always infer that across the closure, so we
+      // narrow explicitly.
+      const repoName = isStarted ? event.repoName : (current?.repoName ?? "")
       const next: PipelineRun = current ? { ...current } : {
         pipelineId: event.pipelineId,
-        repoName: event.repoName,
+        repoName,
         startedAt: Date.now(),
         currentPhase: 0,
         currentPhaseLabel: PIPELINE_PHASES[0] ?? "Pre-flight",

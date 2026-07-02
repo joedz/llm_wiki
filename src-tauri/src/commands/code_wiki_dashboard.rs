@@ -39,6 +39,11 @@ pub struct CodeWikiDashboardInfo {
     pub url: String,
     pub port: u16,
     pub token: String,
+    /// Active persona for this dashboard — `None` falls back to
+    /// whatever UA's localStorage has from a prior session.
+    /// One of `"non-technical"`, `"junior"`, `"experienced"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
 }
 
 #[derive(Default)]
@@ -317,25 +322,32 @@ fn ensure_knowledge_graph(project_path: &Path, repo_name: &str) -> Result<PathBu
 pub async fn code_wiki_open_dashboard(
     project_path: String,
     repo_name: String,
+    persona: Option<String>,
     state: State<'_, DashboardState>,
 ) -> Result<CodeWikiDashboardInfo, String> {
     let project_path_buf = PathBuf::from(&project_path);
     let key = dashboard_key(&project_path, &repo_name);
+    // Validate persona; ignore anything that isn't one of the
+    // three UA-reconized values. We don't fall back to a
+    // default — leaving `None` lets the dashboard SPA pick
+    // up whatever was last set in localStorage.
+    let sanitized_persona = match persona.as_deref() {
+        Some("non-technical") | Some("junior") | Some("experienced") => persona.clone(),
+        _ => None,
+    };
 
     // Reuse if already open
     {
         let entries = state.entries.lock().map_err(|e| format!("lock: {e}"))?;
         if let Some(entry) = entries.get(&key) {
-            let url = format!(
-                "http://{BIND_HOST}:{}/?token={}",
-                entry.port, entry.token
-            );
+            let url = build_dashboard_url(entry.port, &entry.token, sanitized_persona.as_deref());
             return Ok(CodeWikiDashboardInfo {
                 project_path: entry.project_path.to_string_lossy().to_string(),
                 repo_name: entry.repo_name.clone(),
                 url,
                 port: entry.port,
                 token: entry.token.clone(),
+                persona: sanitized_persona,
             });
         }
     }
@@ -397,14 +409,26 @@ pub async fn code_wiki_open_dashboard(
         entries.insert(key, entry);
     }
 
-    let url = format!("http://{BIND_HOST}:{port}/?token={token}");
+    let url = build_dashboard_url(port, &token, sanitized_persona.as_deref());
     Ok(CodeWikiDashboardInfo {
         project_path,
         repo_name,
         url,
         port,
         token,
+        persona: sanitized_persona,
     })
+}
+
+fn build_dashboard_url(
+    port: u16,
+    token: &str,
+    persona: Option<&str>,
+) -> String {
+    match persona {
+        Some(p) => format!("http://{BIND_HOST}:{port}/?token={token}&persona={p}"),
+        None => format!("http://{BIND_HOST}:{port}/?token={token}"),
+    }
 }
 
 #[tauri::command]
@@ -433,16 +457,14 @@ pub async fn code_wiki_list_dashboards(
     let out: Vec<CodeWikiDashboardInfo> = entries
         .iter()
         .map(|(_, entry)| {
-            let url = format!(
-                "http://{BIND_HOST}:{}/?token={}",
-                entry.port, entry.token
-            );
+            let url = build_dashboard_url(entry.port, &entry.token, None);
             CodeWikiDashboardInfo {
                 project_path: entry.project_path.to_string_lossy().to_string(),
                 repo_name: entry.repo_name.clone(),
                 url,
                 port: entry.port,
                 token: entry.token.clone(),
+                persona: None,
             }
         })
         .collect();

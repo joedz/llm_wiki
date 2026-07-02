@@ -121,6 +121,11 @@ pub struct PipelineSummary {
     pub duration_ms: u64,
     pub cancelled: bool,
     pub warnings: Vec<String>,
+    /// Optional LLM `--review` verdict (approved, issues,
+    /// warnings, narrative). Populated only when the pipeline
+    /// ran Phase 8.5 with `review_llm` set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_narrative: Option<serde_json::Value>,
 }
 
 #[derive(Default)]
@@ -327,18 +332,24 @@ fn codegraph_edge_to_ua(kind: &str) -> Option<&'static str> {
 /// applied as `summary`/`tags`/`complexity` on the file-level nodes.
 /// When `llm` is `None`, Phase 2 falls back to the codegraph-only
 /// build (M1 behavior).
+///
+/// `review_llm` (separate from `llm`): when set, Phase 8.5 fires
+/// after the deterministic review (Phase 8) — the LLM gets the
+/// deterministic findings plus a small graph summary and
+/// produces an `approved` decision + narrative. Off by default.
 #[tauri::command]
 pub async fn code_wiki_run_pipeline(
     project_path: String,
     repo_name: String,
     llm: Option<LlmRequestSpec>,
+    review_llm: Option<LlmRequestSpec>,
     app: AppHandle,
     state: tauri::State<'_, Arc<PipelineRegistry>>,
 ) -> Result<(), String> {
     let registry = state.inner().clone();
     let app_for_task = app.clone();
     tokio::spawn(async move {
-        let result = run_pipeline(app_for_task, registry, project_path, repo_name, llm).await;
+        let result = run_pipeline(app_for_task, registry, project_path, repo_name, llm, review_llm).await;
         if let Err(e) = result {
             eprintln!("[code-wiki pipeline] run_pipeline failed: {e}");
         }
@@ -362,6 +373,7 @@ pub async fn run_pipeline(
     project_path: String,
     repo_name: String,
     llm: Option<LlmRequestSpec>,
+    review_llm: Option<LlmRequestSpec>,
 ) -> Result<PipelineSummary, String> {
     // Use project_path as the stable pipelineId — it must match what the
     // frontend store sets in begin() so all events (phase/batch/done) are
@@ -381,6 +393,7 @@ pub async fn run_pipeline(
         &project_for_task,
         &repo_for_task,
         llm,
+        review_llm,
         &cancel,
         Instant::now(),
     )
@@ -398,6 +411,7 @@ async fn run_pipeline_orchestrator(
     project_path: &str,
     repo_name: &str,
     llm: Option<LlmRequestSpec>,
+    review_llm: Option<LlmRequestSpec>,
     cancel: &AtomicBool,
     started: Instant,
 ) -> Result<PipelineSummary, String> {
@@ -630,13 +644,45 @@ async fn run_pipeline_orchestrator(
     // (UA's `knowledge-graph.json` carries stats inline).
     let stats_value = serde_json::to_value(&review.stats)
         .map_err(|e| format!("serialize stats: {e}"))?;
-    // Write stats via a separate field on the project.
-    // For M3 we serialize stats into meta.json below; the
-    // knowledge-graph.json keeps its existing layout.
     emit_phase(app, pipeline_id, 8, "Review", "done");
-    // Suppress unused-variable warning when stats embedding is
-    // not yet wired into the graph struct.
     let _ = stats_value;
+
+    // --- Phase 8.5: LLM review (UA `--review` mode) ---
+    //
+    // Optional — only runs when `review_llm` is provided. LLM
+    // reviews the deterministic findings + a small graph
+    // summary and produces `{approved, issues, warnings, narrative}`.
+    // LLM errors are recorded as warnings; the pipeline never
+    // fails on LLM error.
+    let mut review_narrative: Option<serde_json::Value> = None;
+    if let Some(spec) = review_llm {
+        if check_cancel(cancel) {
+            return Ok(cancelled_summary(
+                pipeline_id, project_path, repo_name, started, &warnings,
+            ));
+        }
+        emit_phase(app, pipeline_id, 8, "LLM Review", "running");
+        match crate::commands::code_wiki_reviewer_llm::call_graph_reviewer(&spec, &review, &graph).await {
+            Ok(verdict) => {
+                if !verdict.approved {
+                    warnings.push(format!(
+                        "LLM review: not approved ({} issues, {} warnings)",
+                        verdict.issues.len(),
+                        verdict.warnings.len()
+                    ));
+                }
+                for w in &verdict.warnings {
+                    warnings.push(format!("LLM review: {w}"));
+                }
+                review_narrative =
+                    Some(crate::commands::code_wiki_reviewer_llm::narrative_for_meta(&verdict));
+            }
+            Err(e) => {
+                warnings.push(format!("LLM review failed: {e}"));
+            }
+        }
+        emit_phase(app, pipeline_id, 8, "LLM Review", "done");
+    }
 
     // --- Phase 9 ---
     if check_cancel(cancel) {
@@ -692,6 +738,7 @@ async fn run_pipeline_orchestrator(
         duration_ms: started.elapsed().as_millis() as u64,
         cancelled: false,
         warnings: warnings.clone(),
+        review_narrative: review_narrative.clone(),
     };
 
     // Auto-refresh the diff overlay so the dashboard's diff view
@@ -846,6 +893,7 @@ fn cancelled_summary(
         duration_ms: started.elapsed().as_millis() as u64,
         cancelled: true,
         warnings: warnings.to_vec(),
+        review_narrative: None,
     }
 }
 

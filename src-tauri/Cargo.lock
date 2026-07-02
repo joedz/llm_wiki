@@ -4511,6 +4511,7 @@ dependencies = [
  "notify",
  "office_oxide",
  "pdfium-render",
+ "regex",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",

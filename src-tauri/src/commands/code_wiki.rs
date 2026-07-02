@@ -6,6 +6,8 @@ use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 
 pub const WIKI_CODE_WIKI_DIR: &str = "wiki/code_wiki";
+pub const WIKI_KNOWLEDGE_DIR: &str = "wiki/knowledge";
+pub const RAW_KNOWLEDGE_DIR: &str = "raw/knowledge";
 pub const CODEGRAPH_DIR_NAME: &str = ".codegraph";
 pub const INDEX_FILE: &str = "index.json";
 pub const GRAPH_FILE: &str = "knowledge-graph.json";
@@ -13,6 +15,18 @@ pub const META_FILE: &str = "meta.json";
 
 pub fn repo_root(project_path: &Path, repo_name: &str) -> PathBuf {
     project_path.join(WIKI_CODE_WIKI_DIR).join(repo_name)
+}
+
+/// Where knowledge-base markdown lives for a given repo (Karpathy-style
+/// wiki inputs). Same outer project_path as code, but a sibling tree.
+pub fn knowledge_source_dir_for(project_path: &Path, repo_name: &str) -> PathBuf {
+    project_path.join(RAW_KNOWLEDGE_DIR).join(repo_name)
+}
+
+/// Where the produced knowledge-graph.json for a repo lives. Sibling
+/// of WIKI_CODE_WIKI_DIR.
+pub fn knowledge_repo_root(project_path: &Path, repo_name: &str) -> PathBuf {
+    project_path.join(WIKI_KNOWLEDGE_DIR).join(repo_name)
 }
 
 /// The source code directory for a repo — where actual source files live.
@@ -39,6 +53,14 @@ pub fn graph_path_for(project_path: &Path, repo_name: &str) -> PathBuf {
 
 pub fn meta_path_for(project_path: &Path, repo_name: &str) -> PathBuf {
     repo_root(project_path, repo_name).join(META_FILE)
+}
+
+pub fn knowledge_graph_path_for(project_path: &Path, repo_name: &str) -> PathBuf {
+    knowledge_repo_root(project_path, repo_name).join(GRAPH_FILE)
+}
+
+pub fn knowledge_meta_path_for(project_path: &Path, repo_name: &str) -> PathBuf {
+    knowledge_repo_root(project_path, repo_name).join(META_FILE)
 }
 
 pub fn index_path_for(project_path: &Path) -> PathBuf {
@@ -193,6 +215,43 @@ pub async fn code_wiki_get_graph(
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(format!("read graph: {}", e)),
+        }
+    })
+    .await
+    .map_err(|e| format!("join error: {}", e))?
+}
+
+#[tauri::command]
+pub async fn code_wiki_get_knowledge_graph(
+    project_path: String,
+    repo_name: String,
+) -> Result<Option<serde_json::Value>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = knowledge_graph_path_for(Path::new(&project_path), &repo_name);
+        match fs::read_to_string(&path) {
+            Ok(raw) => {
+                serde_json::from_str(&raw).map(Some).map_err(|e| format!("parse graph: {}", e))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("read graph: {}", e)),
+        }
+    })
+    .await
+    .map_err(|e| format!("join error: {}", e))?
+}
+
+#[tauri::command]
+pub async fn code_wiki_list_knowledge_repos(project_path: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = std::path::Path::new(&project_path).join(WIKI_KNOWLEDGE_DIR);
+        match std::fs::read_dir(&root) {
+            Ok(entries) => Ok(entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().join(GRAPH_FILE).is_file())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect::<Vec<_>>()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
+            Err(e) => Err(format!("read knowledge repos: {}", e)),
         }
     })
     .await

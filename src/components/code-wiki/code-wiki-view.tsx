@@ -23,6 +23,8 @@ import {
   type DiffOverlay,
 } from "@/lib/code-wiki/diff"
 import { PipelineProgress } from "./pipeline-progress"
+import { PersonaSelector } from "./persona-selector"
+import { useCodeWikiPersonaStore } from "@/stores/code-wiki-persona-store"
 import { normalizePath } from "@/lib/path-utils"
 import { useTranslation } from "react-i18next"
 
@@ -41,6 +43,7 @@ interface OpenDashboardInfo {
   url: string
   port: number
   token: string
+  persona?: string | null
 }
 
 type BuildState =
@@ -141,10 +144,12 @@ export function CodeWikiView() {
     async (repoName: string) => {
       if (!project) return
       setOpenStates((s) => ({ ...s, [repoName]: { kind: "opening" } }))
+      const persona = useCodeWikiPersonaStore.getState().persona
       try {
         const info = await invoke<OpenDashboardInfo>("code_wiki_open_dashboard", {
           projectPath: project.path,
           repoName,
+          persona,
         })
         setOpenStates((s) => ({ ...s, [repoName]: { kind: "open", info } }))
         await openExternal(info.url)
@@ -258,6 +263,7 @@ export function CodeWikiView() {
           </span>
         </div>
         <div className="flex items-center gap-2">
+          <PersonaSelector />
           <span className="text-xs text-muted-foreground">
             {summary.built}/{summary.total} built · {summary.totalFiles} files
           </span>
