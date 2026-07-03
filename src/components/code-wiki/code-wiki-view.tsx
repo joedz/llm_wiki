@@ -16,6 +16,7 @@ import {
   Network,
   Loader2,
   HelpCircle,
+  MessageCircle,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useWikiStore } from "@/stores/wiki-store"
@@ -33,6 +34,7 @@ import { PipelineProgress } from "./pipeline-progress"
 import { KnowledgeProgress } from "./knowledge-progress"
 import { PersonaSelector } from "./persona-selector"
 import { ExplainModal } from "./explain-modal"
+import { ChatPanel } from "./chat-panel"
 import { useCodeWikiPersonaStore } from "@/stores/code-wiki-persona-store"
 import { normalizePath } from "@/lib/path-utils"
 import { useTranslation } from "react-i18next"
@@ -115,6 +117,7 @@ export function CodeWikiView() {
   const [openStates, setOpenStates] = useState<Record<string, OpenState>>({})
   const [copiedRepo, setCopiedRepo] = useState<string | null>(null)
   const [explainRepo, setExplainRepo] = useState<string | null>(null)
+  const [chatRepo, setChatRepo] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     if (!project) return
@@ -472,6 +475,7 @@ export function CodeWikiView() {
                 onBuildKnowledge={() => buildKnowledge(repo.name)}
                 onBuildDomain={() => buildDomain(repo.name)}
                 onExplain={() => setExplainRepo(repo.name)}
+                onChat={() => setChatRepo(repo.name)}
                 knowledgeBuilding={
                   (useKnowledgeStore.getState().byProject[project?.path ?? ""]?.repoName === repo.name) &&
                   useKnowledgeStore.getState().byProject[project?.path ?? ""]?.result === "running"
@@ -493,6 +497,14 @@ export function CodeWikiView() {
           projectPath={project.path}
           repoName={explainRepo}
           onClose={() => setExplainRepo(null)}
+        />
+      )}
+      {project && chatRepo && (
+        <ChatPanel
+          open={Boolean(chatRepo)}
+          projectPath={project.path}
+          repoName={chatRepo}
+          onClose={() => setChatRepo(null)}
         />
       )}
     </div>
@@ -528,6 +540,7 @@ function RepoRow({
   onBuildKnowledge,
   onBuildDomain,
   onExplain,
+  onChat,
   knowledgeBuilding,
   domainBuilding,
   hasKnowledge,
@@ -549,6 +562,7 @@ function RepoRow({
   onBuildKnowledge: () => void
   onBuildDomain: () => void
   onExplain: () => void
+  onChat: () => void
   knowledgeBuilding: boolean
   domainBuilding: boolean
   hasKnowledge: boolean
@@ -703,6 +717,16 @@ function RepoRow({
           >
             <HelpCircle className="mr-1 h-3.5 w-3.5" />
             {t("codeWiki.explainShort", "Explain")}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onChat}
+            disabled={!built}
+            title={t("codeWiki.chatTooltip", "Ask the codebase a question")}
+          >
+            <MessageCircle className="mr-1 h-3.5 w-3.5" />
+            {t("codeWiki.chatShort", "Chat")}
           </Button>
         </div>
       </div>
