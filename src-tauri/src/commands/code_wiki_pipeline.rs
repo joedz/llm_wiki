@@ -959,11 +959,12 @@ fn apply_enrichments(graph: &mut KnowledgeGraph, enrichments: &[FileEnrichment])
         }
     }
 
-    // P1-A: emit reads_from / writes_to edges. We need the source
-    // file node id and the valid_node_ids set so we can avoid
-    // dangling targets. We collect new edges into a Vec so the
-    // borrow checker is happy (graph.nodes is borrowed mutably for
-    // the enrichments above, but here we only borrow immutably).
+    // P1-A + P2-A: emit cross-file edges from LLM-emitted fields
+    // (reads_from / writes_to / subscribes / publishes /
+    // middleware_for). Each tuple of (kind, target_list) is emitted
+    // with the source file node. We collect into a Vec because the
+    // borrow checker disallows mutating `graph.edges` while
+    // iterating `graph.nodes`.
     let valid_node_ids: std::collections::HashSet<String> =
         graph.nodes.iter().map(|n| n.id.clone()).collect();
     let existing_edges: std::collections::HashSet<(String, String, String)> = graph
@@ -977,31 +978,41 @@ fn apply_enrichments(graph: &mut KnowledgeGraph, enrichments: &[FileEnrichment])
         if !valid_node_ids.contains(&source_id) {
             continue;
         }
-        for tgt_rel in enr.reads_from.iter().chain(enr.writes_to.iter()) {
-            let target_id = format!("file:{tgt_rel}");
-            if !valid_node_ids.contains(&target_id) {
-                continue;
+
+        // Tuple of (kind, target_refs)
+        let tuples: [(&str, &[String]); 5] = [
+            ("reads_from", &enr.reads_from),
+            ("writes_to", &enr.writes_to),
+            ("subscribes", &enr.subscribes),
+            ("publishes", &enr.publishes),
+            ("middleware_for", &enr.middleware_for),
+        ];
+        for (kind, targets) in tuples {
+            for tgt_rel in targets {
+                let target_id = format!("file:{tgt_rel}");
+                if !valid_node_ids.contains(&target_id) {
+                    continue;
+                }
+                if source_id == target_id {
+                    continue;
+                }
+                let key = (source_id.clone(), target_id.clone(), kind.to_string());
+                if existing_edges.contains(&key) {
+                    continue;
+                }
+                let weight = match kind {
+                    "middleware_for" => 0.5,
+                    _ => 0.6,
+                };
+                new_edges.push(GraphEdge {
+                    source: source_id.clone(),
+                    target: target_id,
+                    kind: kind.to_string(),
+                    direction: "forward".to_string(),
+                    weight,
+                    description: None,
+                });
             }
-            if source_id == target_id {
-                continue;
-            }
-            let kind = if enr.reads_from.iter().any(|r| r == tgt_rel) {
-                "reads_from"
-            } else {
-                "writes_to"
-            };
-            let key = (source_id.clone(), target_id.clone(), kind.to_string());
-            if existing_edges.contains(&key) {
-                continue;
-            }
-            new_edges.push(GraphEdge {
-                source: source_id.clone(),
-                target: target_id,
-                kind: kind.to_string(),
-                direction: "forward".to_string(),
-                weight: 0.5,
-                description: None,
-            });
         }
     }
     graph.edges.extend(new_edges);
@@ -1470,6 +1481,9 @@ mod tests {
                 complexity: "simple".to_string(),
                 reads_from: vec![],
                 writes_to: vec![],
+                subscribes: vec![],
+                publishes: vec![],
+                middleware_for: vec![],
             },
             FileEnrichment {
                 path: "src/main.rs".to_string(),
@@ -1478,6 +1492,9 @@ mod tests {
                 complexity: "simple".to_string(),
                 reads_from: vec![],
                 writes_to: vec![],
+                subscribes: vec![],
+                publishes: vec![],
+                middleware_for: vec![],
             },
         ];
         apply_enrichments(&mut g, &enrichments);
@@ -1502,6 +1519,9 @@ mod tests {
             complexity: "simple".to_string(),
             reads_from: vec![],
             writes_to: vec![],
+            subscribes: vec![],
+            publishes: vec![],
+            middleware_for: vec![],
         }];
         apply_enrichments(&mut g, &enrichments);
         // Original node unchanged
@@ -1521,6 +1541,9 @@ mod tests {
             complexity: "simple".to_string(),
             reads_from: vec!["src/config.rs".to_string()],
             writes_to: vec![],
+            subscribes: vec![],
+            publishes: vec![],
+            middleware_for: vec![],
         }];
         apply_enrichments(&mut g, &enrichments);
         assert_eq!(g.edges.len(), 1);
@@ -1541,6 +1564,9 @@ mod tests {
             complexity: "simple".to_string(),
             reads_from: vec![],
             writes_to: vec!["src/cache.json".to_string()],
+            subscribes: vec![],
+            publishes: vec![],
+            middleware_for: vec![],
         }];
         apply_enrichments(&mut g, &enrichments);
         assert_eq!(g.edges.len(), 1);
@@ -1558,6 +1584,9 @@ mod tests {
             complexity: "simple".to_string(),
             reads_from: vec!["src/missing.rs".to_string()],
             writes_to: vec!["src/also_missing.rs".to_string()],
+            subscribes: vec![],
+            publishes: vec![],
+            middleware_for: vec![],
         }];
         apply_enrichments(&mut g, &enrichments);
         // Neither target exists — no edges
@@ -1575,6 +1604,9 @@ mod tests {
             complexity: "simple".to_string(),
             reads_from: vec!["src/lib.rs".to_string()],
             writes_to: vec![],
+            subscribes: vec![],
+            publishes: vec![],
+            middleware_for: vec![],
         }];
         apply_enrichments(&mut g, &enrichments);
         assert_eq!(g.edges.len(), 0);

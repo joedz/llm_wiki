@@ -43,6 +43,17 @@ pub struct FileEnrichment {
     /// constraints as `reads_from`.
     #[serde(default)]
     pub writes_to: Vec<String>,
+    /// P2-A: pub/sub event-bus topics this file subscribes to.
+    /// Determined by LLM (path conventions alone are not enough).
+    #[serde(default)]
+    pub subscribes: Vec<String>,
+    /// P2-A: pub/sub event-bus topics this file publishes to.
+    #[serde(default)]
+    pub publishes: Vec<String>,
+    /// P2-A: route file paths this middleware / interceptor / guard
+    /// wraps. Direction is middleware → route.
+    #[serde(default)]
+    pub middleware_for: Vec<String>,
 }
 
 /// The LLM's response shape. We keep it narrow for M2: just a
@@ -106,7 +117,10 @@ fn read_source_for_prompt(path: &Path) -> String {
     String::from_utf8_lossy(&bytes).to_string()
 }
 
-const SYSTEM_PROMPT: &str = "You are an expert code analyst. Your job is to read source files and produce precise, structured knowledge-graph enrichments.\n\nFor every file in the input, you produce one enrichment object with:\n  - path: the file's path (string, exact match)\n  - summary: 1-2 sentences describing the file's purpose and role in the project. Be specific — name the functions/classes/patterns that matter, not the obvious category. Avoid generic phrases like \"contains utility functions\".\n  - tags: 2-5 short lowercase tags. Prefer specific domain terms (e.g. \"api-handler\", \"config-loader\", \"diff-algorithm\") over generic ones (\"code\").\n  - complexity: \"simple\" (under ~50 non-empty lines, single concern), \"moderate\" (typical), or \"complex\" (large file or multiple intertwined concerns).\n  - reads_from: optional array of relative paths the file reads data from (e.g. another module's exported constant, a config file). Limit to top-3. Each path must exist in the project's import map. Omit the field if there is no clear data flow.\n  - writes_to: optional array of relative paths the file writes data to. Same constraints as reads_from. Use sparingly — false positives pollute the graph.\n\nReturn your answer as JSON matching this schema:\n{\n  \"enrichments\": [\n    {\n      \"path\": \"...\",\n      \"summary\": \"...\",\n      \"tags\": [\"...\"],\n      \"complexity\": \"simple|moderate|complex\",\n      \"reads_from\": [\"<rel_path>\"],\n      \"writes_to\": [\"<rel_path>\"]\n    }\n  ]\n}\n\nConstraints:\n- Emit exactly one enrichment per file in the input.\n- Do not add new fields.\n- Do not invent files.\n- Use English unless the file's content is clearly in another language (e.g. README in Chinese → summary in Chinese).\n- reads_from and writes_to are optional. Omit them (or use []) for files that have no clear cross-file data flow.";
+const SYSTEM_PROMPT: &str = "You are an expert code analyst. Your job is to read source files and produce precise, structured knowledge-graph enrichments.\n\nFor every file in the input, you produce one enrichment object with:\n  - path: the file's path (string, exact match)\n  - summary: 1-2 sentences describing the file's purpose and role in the project. Be specific — name the functions/classes/patterns that matter, not the obvious category. Avoid generic phrases like \"contains utility functions\".\n  - tags: 2-5 short lowercase tags. Prefer specific domain terms (e.g. \"api-handler\", \"config-loader\", \"diff-algorithm\") over generic ones (\"code\").\n  - complexity: \"simple\" (under ~50 non-empty lines, single concern), \"moderate\" (typical), or \"complex\" (large file or multiple intertwined concerns).\n  - reads_from: optional array of relative paths the file reads data from (e.g. another module's exported constant, a config file). Limit to top-3. Each path must exist in the project's import map. Omit the field if there is no clear data flow.\n  - writes_to: optional array of relative paths the file writes data to. Same constraints as reads_from. Use sparingly — false positives pollute the graph.
+  - subscribes: optional array of relative paths (event-bus / pubsub files) this file subscribes to. Top-3. Emit when you see `redis.subscribe`, `kafka.consumer.subscribe`, `eventBus.on(`, etc.
+  - publishes: optional array of relative paths this file publishes events to. Top-3.
+  - middleware_for: optional array of route file paths this middleware / interceptor / guard wraps. Direction is middleware → route.\n\nReturn your answer as JSON matching this schema:\n{\n  \"enrichments\": [\n    {\n      \"path\": \"...\",\n      \"summary\": \"...\",\n      \"tags\": [\"...\"],\n      \"complexity\": \"simple|moderate|complex\",\n      \"reads_from\": [\"<rel_path>\"],\n      \"writes_to\": [\"<rel_path>\"],\n      \"subscribes\": [\"<rel_path>\"],\n      \"publishes\": [\"<rel_path>\"],\n      \"middleware_for\": [\"<rel_path>\"]\n    }\n  ]\n}\n\nConstraints:\n- Emit exactly one enrichment per file in the input.\n- Do not add new fields.\n- Do not invent files.\n- Use English unless the file's content is clearly in another language (e.g. README in Chinese → summary in Chinese).\n- reads_from, writes_to, subscribes, publishes, and middleware_for are all optional. Omit (or use []) for files with no clear cross-file relationships.";
 
 fn user_message_with_schema_repeat(user: &str) -> String {
     // The repeated schema is a defensive measure: for short models
@@ -117,7 +131,9 @@ fn user_message_with_schema_repeat(user: &str) -> String {
         "{user}\n\n---\nRespond with valid JSON matching this exact schema:\n\
          {{\"enrichments\": [{{\"path\": \"<file path>\", \"summary\": \"<one-line summary>\", \
          \"tags\": [\"<short tag>\"], \"complexity\": \"simple|moderate|complex\", \
-         \"reads_from\": [\"<rel_path>\"], \"writes_to\": [\"<rel_path>\"]}}]}}"
+         \"reads_from\": [\"<rel_path>\"], \"writes_to\": [\"<rel_path>\"], \
+         \"subscribes\": [\"<rel_path>\"], \"publishes\": [\"<rel_path>\"], \
+         \"middleware_for\": [\"<rel_path>\"]}}]}}"
     )
 }
 

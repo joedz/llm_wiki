@@ -845,6 +845,27 @@ pub fn build_graph_via_tree_sitter(
         project_root,
         &valid_node_ids,
     ));
+    // P2-A: nine additional infrastructure edge types
+    edges.extend(crate::commands::code_wiki_edge_rules::extract_pub_sub(
+        scan,
+        &valid_node_ids,
+    ));
+    edges.extend(crate::commands::code_wiki_edge_rules::extract_routes_and_middleware(
+        scan,
+        project_root,
+        &valid_node_ids,
+    ));
+    edges.extend(crate::commands::code_wiki_edge_rules::extract_schema_definitions(
+        scan,
+        &valid_node_ids,
+    ));
+    edges.extend(
+        crate::commands::code_wiki_edge_rules::extract_infrastructure_topology(
+            scan,
+            project_root,
+            &valid_node_ids,
+        ),
+    );
 
     edges.sort_by(|a, b| a.source.cmp(&b.source).then(a.target.cmp(&b.target)));
 

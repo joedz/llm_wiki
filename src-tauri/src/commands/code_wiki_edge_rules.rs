@@ -1,23 +1,27 @@
 // Deterministic extraction for non-code edge types.
 //
-// Three of the five new edge types added in P1-A are deterministic
-// enough to derive from filenames + path conventions alone (no LLM):
+// P1-A added three deterministic extractors (`tested_by` /
+// `configures` / `depends_on`) plus LLM-emitted `reads_from` /
+// `writes_to`. P2-A extends coverage to nine additional edge types
+// from UA's spec:
 //
-//   - `tested_by`: pair test files with their production counterpart
-//     using path-canonicalization. Direction is canonicalised to
-//     `production → test` (UA's convention).
+//   - `subscribes` / `publishes`: pub/sub topology from
+//     `subscribers/` / `consumers/` / `publishers/` / `producers/` /
+//     `events/` directory conventions, connected via a shared event
+//     module.
 //
-//   - `configures`: config-file → target-language heuristics.
-//     `tsconfig.json` configures all `.ts` files; `package.json`
-//     configures the entry point; `.env*` configures runtime code.
-//     We cap target counts to keep the graph readable.
+//   - `middleware`: middleware → routes file pairing based on
+//     imports.
 //
-//   - `depends_on`: non-code → code relationships for infra files
-//     (Dockerfile, docker-compose, GitHub Actions workflows, Makefile,
-//     package.json scripts). Extracted with simple regex/JSON rules.
+//   - `routes`: routing configs (nginx / ingress / routes.ts /
+//     web.php) → upstream service files.
 //
-// The other two (`reads_from` / `writes_to`) are emitted by the LLM
-// in Phase 2 via the extended `FileEnrichment` schema.
+//   - `defines_schema`: schema files (GraphQL / Protobuf / JSON
+//     Schema / OpenAPI) → consumer files (resolvers / clients).
+//
+//   - `triggers` / `serves` / `provisions` / `migrates`: infra file
+//     → target code / resource / table mapping for CI workflows,
+//     K8s manifests, Terraform, and SQL migrations respectively.
 //
 // All functions are pure: they take a `ScanResult` (for file paths +
 // categories) plus the set of valid node ids from the in-progress
@@ -768,6 +772,875 @@ fn extract_depends_on_targets(rel: &str, content: &str) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
+// P2-A: subscribes / publishes / middleware / routes / defines_schema
+//        / triggers / serves / provisions / migrates
+// ---------------------------------------------------------------------------
+
+/// P2-A: Pub/sub topology — connect subscribers to publishers via a
+/// shared event module when one exists, else connect them directly.
+///
+/// Conventions recognized (case-insensitive, by directory and
+/// filename):
+///   - subscribers: `src/subscribers/`, `src/consumers/`,
+///     `src/events/handlers/`, `src/listeners/`
+///     Filename: `*.subscriber.ts`, `*.consumer.ts`
+///   - publishers: `src/publishers/`, `src/producers/`,
+///     `src/events/`
+///     Filename: `*.publisher.ts`, `*.producer.ts`
+pub fn extract_pub_sub(
+    scan: &ScanResult,
+    valid_node_ids: &HashSet<String>,
+) -> Vec<GraphEdge> {
+    let mut edges = Vec::new();
+    let mut seen: HashSet<(String, String, String)> = HashSet::new();
+
+    let subscribers = collect_pub_sub_files(scan, PubSubRole::Subscriber);
+    let publishers = collect_pub_sub_files(scan, PubSubRole::Publisher);
+
+    // Build a map: event-bus basename → path. Events are files in
+    // events/ that don't have a "subscriber"/"publisher"/"consumer"/
+    // "producer" suffix.
+    let event_bus: std::collections::BTreeMap<String, String> = scan
+        .files
+        .iter()
+        .filter(|f| is_event_bus_path(&f.path))
+        .filter(|f| !is_pub_sub_role(&f.path).is_some())
+        .map(|f| {
+            let stem = event_bus_stem(&f.path);
+            (stem, f.path.clone())
+        })
+        .collect();
+
+    // subscribers → publishers (via shared event bus if any)
+    for (sub_path, _sub_file) in &subscribers {
+        let sub_basename = pub_sub_basename(sub_path);
+        let source_id = format!("file:{sub_path}");
+        if !valid_node_ids.contains(&source_id) {
+            continue;
+        }
+        for (pub_path, _pub_file) in &publishers {
+            let pub_basename = pub_sub_basename(pub_path);
+            let target_id = format!("file:{pub_path}");
+            if !valid_node_ids.contains(&target_id) {
+                continue;
+            }
+            // Same event name → connect via event bus path if it exists
+            let shared_event = if sub_basename == pub_basename {
+                event_bus.get(&sub_basename).cloned()
+            } else {
+                None
+            };
+            let (kind, edge_source, edge_target) = if let Some(ev) = shared_event {
+                let ev_id = format!("file:{ev}");
+                if !valid_node_ids.contains(&ev_id) {
+                    continue;
+                }
+                ("subscribes", source_id.clone(), ev_id)
+            } else {
+                // No event bus: connect subscriber directly to publisher
+                ("subscribes", source_id.clone(), target_id.clone())
+            };
+            let key = (edge_source.clone(), edge_target.clone(), kind.to_string());
+            if seen.insert(key) {
+                edges.push(GraphEdge {
+                    source: edge_source,
+                    target: edge_target,
+                    kind: kind.to_string(),
+                    direction: "forward".to_string(),
+                    weight: 0.6,
+                    description: None,
+                });
+            }
+        }
+    }
+
+    // publishers → subscribers (only via event bus; without a bus
+    // we don't know which subscriber consumes which event)
+    for (pub_path, _) in &publishers {
+        let pub_basename = pub_sub_basename(pub_path);
+        let source_id = format!("file:{pub_path}");
+        if !valid_node_ids.contains(&source_id) {
+            continue;
+        }
+        if let Some(ev) = event_bus.get(&pub_basename) {
+            let ev_id = format!("file:{ev}");
+            if !valid_node_ids.contains(&ev_id) {
+                continue;
+            }
+            // Emit publishes for each subscriber of this event bus
+            for (sub_path, _) in &subscribers {
+                if pub_sub_basename(sub_path) != pub_basename {
+                    continue;
+                }
+                let target_id = format!("file:{sub_path}");
+                let key = (source_id.clone(), target_id.clone(), "publishes".to_string());
+                if seen.insert(key) {
+                    edges.push(GraphEdge {
+                        source: source_id.clone(),
+                        target: target_id,
+                        kind: "publishes".to_string(),
+                        direction: "forward".to_string(),
+                        weight: 0.6,
+                        description: None,
+                    });
+                }
+            }
+        }
+    }
+
+    edges
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PubSubRole {
+    Subscriber,
+    Publisher,
+}
+
+fn collect_pub_sub_files(scan: &ScanResult, role: PubSubRole) -> Vec<(String, &crate::commands::code_wiki_scanner::ScannedFile)> {
+    scan.files
+        .iter()
+        .filter(|f| is_pub_sub_role(&f.path) == Some(role))
+        .map(|f| (f.path.clone(), f))
+        .collect()
+}
+
+fn is_pub_sub_role(rel: &str) -> Option<PubSubRole> {
+    let lower = rel.to_ascii_lowercase();
+    let filename = lower.rsplit_once('/').map(|(_, f)| f).unwrap_or(lower.as_str());
+    let dir = lower.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+
+    // Filename suffixes
+    if filename.ends_with(".subscriber.ts")
+        || filename.ends_with(".subscriber.js")
+        || filename.ends_with(".consumer.ts")
+        || filename.ends_with(".consumer.go")
+    {
+        return Some(PubSubRole::Subscriber);
+    }
+    if filename.ends_with(".publisher.ts")
+        || filename.ends_with(".publisher.js")
+        || filename.ends_with(".producer.ts")
+        || filename.ends_with(".producer.go")
+    {
+        return Some(PubSubRole::Publisher);
+    }
+    // Directory conventions
+    if dir.contains("/subscribers/")
+        || dir.contains("/consumers/")
+        || dir.contains("/listeners/")
+        || dir.ends_with("/subscribers")
+        || dir.ends_with("/consumers")
+        || dir.ends_with("/listeners")
+        || dir.contains("/events/handlers/")
+    {
+        return Some(PubSubRole::Subscriber);
+    }
+    if dir.contains("/publishers/")
+        || dir.contains("/producers/")
+        || dir.ends_with("/publishers")
+        || dir.ends_with("/producers")
+    {
+        return Some(PubSubRole::Publisher);
+    }
+    None
+}
+
+fn is_event_bus_path(rel: &str) -> bool {
+    let lower = rel.to_ascii_lowercase();
+    let dir = lower.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    // events/ directory containing event definitions (not handlers)
+    dir.contains("/events/") || dir.ends_with("/events")
+}
+
+fn pub_sub_basename(path: &str) -> String {
+    let lower = path.to_ascii_lowercase();
+    let filename = lower.rsplit_once('/').map(|(_, f)| f).unwrap_or(lower.as_str());
+    let stem = filename.rsplit_once('.').map(|(s, _)| s).unwrap_or(filename);
+    // Strip common suffixes
+    for suf in [".subscriber", ".consumer", ".publisher", ".producer"] {
+        if let Some(s) = stem.strip_suffix(suf) {
+            return s.to_string();
+        }
+    }
+    stem.to_string()
+}
+
+fn event_bus_stem(path: &str) -> String {
+    let lower = path.to_ascii_lowercase();
+    let filename = lower.rsplit_once('/').map(|(_, f)| f).unwrap_or(lower.as_str());
+    filename
+        .rsplit_once('.')
+        .map(|(s, _)| s.to_string())
+        .unwrap_or_else(|| filename.to_string())
+}
+
+/// P2-A: Routes + middleware topology. Routes files (nginx / ingress
+/// / routes.ts / web.php) emit `routes` edges to their target service
+/// files. Middleware files emit `middleware` edges to the route file
+/// that imports them.
+pub fn extract_routes_and_middleware(
+    scan: &ScanResult,
+    project_root: &Path,
+    valid_node_ids: &HashSet<String>,
+) -> Vec<GraphEdge> {
+    let mut edges = Vec::new();
+    let mut seen: HashSet<(String, String, String)> = HashSet::new();
+
+    for f in &scan.files {
+        let lower = f.path.to_ascii_lowercase();
+        let filename = lower.rsplit_once('/').map(|(_, f)| f).unwrap_or(lower.as_str());
+
+        let route_kind = classify_route_file(filename);
+        if let Some(target) = route_kind {
+            let source_id = format!("file:{}", f.path);
+            if !valid_node_ids.contains(&source_id) {
+                continue;
+            }
+            let abs = project_root.join(&f.path);
+            let content = std::fs::read_to_string(&abs).unwrap_or_default();
+            for tgt in extract_route_targets(filename, &content, target) {
+                let target_id = format!("file:{tgt}");
+                if !valid_node_ids.contains(&target_id) {
+                    continue;
+                }
+                let key = (source_id.clone(), target_id.clone(), "routes".to_string());
+                if seen.insert(key) {
+                    edges.push(GraphEdge {
+                        source: source_id.clone(),
+                        target: target_id,
+                        kind: "routes".to_string(),
+                        direction: "forward".to_string(),
+                        weight: 0.6,
+                        description: None,
+                    });
+                }
+            }
+        }
+    }
+
+    // Middleware: any file in middleware/ / interceptors/ / guards/ dir
+    // or matching a filename pattern, plus routes/index.ts / routes.ts
+    // that imports it (use scan.import_map if available).
+    let middleware_files: Vec<String> = scan
+        .files
+        .iter()
+        .filter(|f| is_middleware_path(&f.path))
+        .map(|f| f.path.clone())
+        .collect();
+
+    for mw in &middleware_files {
+        let source_id = format!("file:{mw}");
+        if !valid_node_ids.contains(&source_id) {
+            continue;
+        }
+        // Find routes files that import this middleware.
+        for routes_file in scan.files.iter().filter(|f| is_routes_filename(&f.path)) {
+            let imports = scan
+                .import_map
+                .get(&routes_file.path)
+                .cloned()
+                .unwrap_or_default();
+            if imports.iter().any(|i| i == mw) {
+                let target_id = format!("file:{}", routes_file.path);
+                let key = (source_id.clone(), target_id.clone(), "middleware".to_string());
+                if seen.insert(key) {
+                    edges.push(GraphEdge {
+                        source: source_id.clone(),
+                        target: target_id,
+                        kind: "middleware".to_string(),
+                        direction: "forward".to_string(),
+                        weight: 0.5,
+                        description: None,
+                    });
+                }
+            }
+        }
+    }
+
+    edges
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RouteTarget {
+    /// nginx.conf / *.nginx.conf — proxy_pass to upstream service
+    Nginx,
+    /// ingress*.yaml — service.name + service.port
+    Ingress,
+    /// routes.ts / router.ts / app routes — app.use(path, handler)
+    TsRoutes,
+    /// web.php / api.php — Route::get('path', Controller::class)
+    LaravelRoutes,
+}
+
+fn classify_route_file(filename: &str) -> Option<RouteTarget> {
+    if filename == "nginx.conf" || filename.ends_with(".nginx.conf") {
+        return Some(RouteTarget::Nginx);
+    }
+    if filename.starts_with("ingress") && (filename.ends_with(".yaml") || filename.ends_with(".yml")) {
+        return Some(RouteTarget::Ingress);
+    }
+    if filename == "routes.ts"
+        || filename == "router.ts"
+        || filename == "routes.js"
+        || filename == "router.js"
+    {
+        return Some(RouteTarget::TsRoutes);
+    }
+    if filename == "web.php" || filename == "api.php" {
+        return Some(RouteTarget::LaravelRoutes);
+    }
+    None
+}
+
+fn extract_route_targets(
+    filename: &str,
+    content: &str,
+    target: RouteTarget,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    match target {
+        RouteTarget::Nginx => {
+            // proxy_pass http://<service>;  /  proxy_pass http://<service>:<port>;
+            for line in content.lines() {
+                let t = line.trim_start();
+                if let Some(rest) = t
+                    .strip_prefix("proxy_pass")
+                    .or_else(|| t.strip_prefix("proxy_pass "))
+                {
+                    let v = rest
+                        .trim()
+                        .trim_end_matches(';')
+                        .trim_matches('"')
+                        .trim_matches('\'');
+                    if let Some(upstream) = v
+                        .strip_prefix("http://")
+                        .or_else(|| v.strip_prefix("https://"))
+                    {
+                        let svc = upstream
+                            .split(':')
+                            .next()
+                            .unwrap_or(upstream)
+                            .split('/')
+                            .next()
+                            .unwrap_or(upstream)
+                            .trim();
+                        if !svc.is_empty() {
+                            // Emit with common code extensions so the
+                            // target hits the existing scan files.
+                            for ext in ["ts", "js", "py", "go"] {
+                                out.push(format!("services/{svc}.{ext}"));
+                                out.push(format!("src/services/{svc}.{ext}"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        RouteTarget::Ingress => {
+            // service: name + port — find under backend: block
+            let mut current_service: Option<String> = None;
+            for line in content.lines() {
+                let t = line.trim_start();
+                if t.starts_with("service:") {
+                    let v = t
+                        .trim_start_matches("service:")
+                        .trim()
+                        .trim_matches('"')
+                        .trim_matches('\'');
+                    current_service = Some(v.to_string());
+                }
+            }
+            if let Some(svc) = current_service {
+                for ext in ["ts", "js", "py", "go"] {
+                    out.push(format!("services/{svc}.{ext}"));
+                    out.push(format!("src/services/{svc}.{ext}"));
+                }
+            }
+        }
+        RouteTarget::TsRoutes => {
+            // app.use('/path', handler) or router.use('/path', handler)
+            for line in content.lines() {
+                let t = line.trim_start();
+                if let Some(rest) = t.strip_prefix("app.use(").or_else(|| t.strip_prefix("router.use(")) {
+                    // path, handler
+                    let parts: Vec<&str> = rest
+                        .split(',')
+                        .map(|s| s.trim().trim_matches('\'').trim_matches('"'))
+                        .collect();
+                    if parts.len() >= 2 {
+                        out.push(parts[1].to_string());
+                    }
+                }
+            }
+        }
+        RouteTarget::LaravelRoutes => {
+            // Route::get('/path', Controller::class)
+            for line in content.lines() {
+                if line.contains("Route::") {
+                    // Best-effort: extract the controller reference
+                    if let Some(idx) = line.find("use App\\Http\\Controllers\\") {
+                        let rest = &line[idx + "use App\\Http\\Controllers\\".len()..];
+                        if let Some(end) = rest.find(|c: char| c == ';' || c == ' ' || c == '\n') {
+                            out.push(format!("app/Http/Controllers/{}.php", &rest[..end]));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let _ = filename;
+    out
+}
+
+fn is_routes_filename(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let filename = lower.rsplit_once('/').map(|(_, f)| f).unwrap_or(lower.as_str());
+    classify_route_file(filename).is_some()
+        || filename.contains(".routes.")
+        || filename.contains(".router.")
+        || filename == "routes.ts"
+        || filename == "router.ts"
+        // Routes-as-a-folder: any file under a `routes/` or `router/` directory
+        // is also a candidate (the directory itself is the routes container).
+        || lower.contains("/routes/")
+        || lower.contains("/router/")
+        || lower.starts_with("routes/")
+        || lower.starts_with("router/")
+}
+
+fn is_middleware_path(rel: &str) -> bool {
+    let lower = rel.to_ascii_lowercase();
+    let dir = lower.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    let filename = lower.rsplit_once('/').map(|(_, f)| f).unwrap_or(lower.as_str());
+
+    dir.contains("/middleware/")
+        || dir.contains("/middlewares/")
+        || dir.contains("/interceptors/")
+        || dir.contains("/guards/")
+        || dir.ends_with("/middleware")
+        || dir.ends_with("/middlewares")
+        || dir.ends_with("/interceptors")
+        || dir.ends_with("/guards")
+        || filename.ends_with(".middleware.ts")
+        || filename.ends_with(".middleware.js")
+        || filename.ends_with(".guard.ts")
+        || filename.ends_with(".interceptor.ts")
+}
+
+/// P2-A: Schema files (GraphQL / Protobuf / JSON Schema / OpenAPI)
+/// emit `defines_schema` edges to consumer files (resolvers /
+/// clients / models). Targets are inferred by import_map.
+pub fn extract_schema_definitions(
+    scan: &ScanResult,
+    valid_node_ids: &HashSet<String>,
+) -> Vec<GraphEdge> {
+    let mut edges = Vec::new();
+    let mut seen: HashSet<(String, String, String)> = HashSet::new();
+
+    for f in &scan.files {
+        let schema_kind = classify_schema_file(&f.path);
+        let Some(kind) = schema_kind else { continue };
+        let source_id = format!("file:{}", f.path);
+        if !valid_node_ids.contains(&source_id) {
+            continue;
+        }
+        let targets = schema_consumer_paths(&f.path, kind, scan);
+        for tgt in targets {
+            let target_id = format!("file:{tgt}");
+            if !valid_node_ids.contains(&target_id) {
+                continue;
+            }
+            let key = (source_id.clone(), target_id.clone(), "defines_schema".to_string());
+            if seen.insert(key) {
+                edges.push(GraphEdge {
+                    source: source_id.clone(),
+                    target: target_id,
+                    kind: "defines_schema".to_string(),
+                    direction: "forward".to_string(),
+                    weight: 0.8,
+                    description: None,
+                });
+            }
+        }
+    }
+
+    edges
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SchemaKind {
+    Graphql,
+    Protobuf,
+    JsonSchema,
+    OpenApi,
+}
+
+fn classify_schema_file(rel: &str) -> Option<SchemaKind> {
+    let lower = rel.to_ascii_lowercase();
+    let filename = lower.rsplit_once('/').map(|(_, f)| f).unwrap_or(lower.as_str());
+    if filename.ends_with(".graphql") || filename.ends_with(".gql") {
+        return Some(SchemaKind::Graphql);
+    }
+    if filename.ends_with(".proto") {
+        return Some(SchemaKind::Protobuf);
+    }
+    // *.schema.json but not tsconfig.json
+    if filename.ends_with(".schema.json") && !filename.starts_with("tsconfig") {
+        return Some(SchemaKind::JsonSchema);
+    }
+    if (filename == "openapi.yaml" || filename == "openapi.yml" || filename == "openapi.json")
+        || filename.starts_with("openapi.")
+    {
+        return Some(SchemaKind::OpenApi);
+    }
+    None
+}
+
+fn schema_consumer_paths(schema_path: &str, kind: SchemaKind, scan: &ScanResult) -> Vec<String> {
+    let schema_dir = std::path::Path::new(schema_path)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let consumer_keywords: &[&str] = match kind {
+        SchemaKind::Graphql => &["resolver", "handler", "controller", "query"],
+        SchemaKind::Protobuf => &["service", "client", "server", "rpc"],
+        SchemaKind::JsonSchema => &["model", "types", "schema"],
+        SchemaKind::OpenApi => &["controller", "handler", "client", "sdk"],
+    };
+
+    let mut out = Vec::new();
+    let exts = ["ts", "tsx", "js", "jsx", "py", "go", "java", "kt"];
+
+    for f in &scan.files {
+        let lower = f.path.to_ascii_lowercase();
+        let file_ext = lower.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+        if !exts.contains(&file_ext) {
+            continue;
+        }
+        if !consumer_keywords.iter().any(|kw| lower.contains(kw)) {
+            continue;
+        }
+        // Prefer same-directory matches; otherwise anything containing
+        // the schema's parent directory.
+        if !schema_dir.is_empty() {
+            let parent = std::path::Path::new(&schema_dir)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if !parent.is_empty() && lower.contains(&parent) {
+                out.push(f.path.clone());
+            }
+        }
+        if out.len() >= 50 {
+            break;
+        }
+    }
+    if out.is_empty() {
+        // Fallback: any consumer-keyword file in the project
+        for f in &scan.files {
+            let lower = f.path.to_ascii_lowercase();
+            if consumer_keywords.iter().any(|kw| lower.contains(kw)) {
+                out.push(f.path.clone());
+                if out.len() >= 50 {
+                    break;
+                }
+            }
+        }
+    }
+    let _ = schema_path;
+    out
+}
+
+/// P2-A: Infrastructure topology — `triggers` / `serves` /
+/// `provisions` / `migrates`. Each is driven by a different file
+/// convention; we parse a minimum viable subset of each format to
+/// find the target file path.
+pub fn extract_infrastructure_topology(
+    scan: &ScanResult,
+    project_root: &Path,
+    valid_node_ids: &HashSet<String>,
+) -> Vec<GraphEdge> {
+    let mut edges = Vec::new();
+    let mut seen: HashSet<(String, String, String)> = HashSet::new();
+
+    for f in &scan.files {
+        let lower = f.path.to_ascii_lowercase();
+        let filename = lower.rsplit_once('/').map(|(_, f)| f).unwrap_or(lower.as_str());
+        let abs = project_root.join(&f.path);
+        let content = std::fs::read_to_string(&abs).unwrap_or_default();
+        if f.path.contains("migrations") {
+            eprintln!("DEBUG: {} content = {:?}", f.path, content);
+        }
+
+        // triggers: GH Actions / GitLab CI / Jenkins
+        if lower.starts_with(".github/workflows/")
+            || filename == ".gitlab-ci.yml"
+            || filename == "jenkinsfile"
+        {
+            let source_id = format!("file:{}", f.path);
+            if !valid_node_ids.contains(&source_id) {
+                continue;
+            }
+            for tgt in extract_trigger_targets(&content) {
+                let target_id = format!("file:{tgt}");
+                let key = (source_id.clone(), target_id.clone(), "triggers".to_string());
+                if seen.insert(key) {
+                    edges.push(GraphEdge {
+                        source: source_id.clone(),
+                        target: target_id,
+                        kind: "triggers".to_string(),
+                        direction: "forward".to_string(),
+                        weight: 0.6,
+                        description: None,
+                    });
+                }
+            }
+        }
+
+        // serves: k8s / manifests with Deployment or Service
+        if lower.starts_with("k8s/")
+            || lower.starts_with("kubernetes/")
+            || lower.starts_with("manifests/")
+            || filename.starts_with("deployment")
+            || filename.starts_with("service")
+        {
+            if !filename.ends_with(".yaml") && !filename.ends_with(".yml") {
+                continue;
+            }
+            let source_id = format!("file:{}", f.path);
+            if !valid_node_ids.contains(&source_id) {
+                continue;
+            }
+            for tgt in extract_serve_targets(&content) {
+                let target_id = format!("file:{tgt}");
+                let key = (source_id.clone(), target_id.clone(), "serves".to_string());
+                if seen.insert(key) {
+                    edges.push(GraphEdge {
+                        source: source_id.clone(),
+                        target: target_id,
+                        kind: "serves".to_string(),
+                        direction: "forward".to_string(),
+                        weight: 0.7,
+                        description: None,
+                    });
+                }
+            }
+        }
+
+        // provisions: *.tf
+        if filename.ends_with(".tf") {
+            let source_id = format!("file:{}", f.path);
+            if !valid_node_ids.contains(&source_id) {
+                continue;
+            }
+            for tgt in extract_provisions_targets(&content) {
+                let target_id = format!("file:{tgt}");
+                let key = (source_id.clone(), target_id.clone(), "provisions".to_string());
+                if seen.insert(key) {
+                    edges.push(GraphEdge {
+                        source: source_id.clone(),
+                        target: target_id,
+                        kind: "provisions".to_string(),
+                        direction: "forward".to_string(),
+                        weight: 0.7,
+                        description: None,
+                    });
+                }
+            }
+        }
+
+        // migrates: SQL migrations
+        if is_sql_migration(&f.path) {
+            let source_id = format!("file:{}", f.path);
+            if !valid_node_ids.contains(&source_id) {
+                continue;
+            }
+            for tgt in extract_migration_targets(&content, scan) {
+                let target_id = format!("file:{tgt}");
+                if !valid_node_ids.contains(&target_id) {
+                    continue;
+                }
+                let key = (source_id.clone(), target_id.clone(), "migrates".to_string());
+                if seen.insert(key) {
+                    edges.push(GraphEdge {
+                        source: source_id.clone(),
+                        target: target_id,
+                        kind: "migrates".to_string(),
+                        direction: "forward".to_string(),
+                        weight: 0.7,
+                        description: None,
+                    });
+                }
+            }
+        }
+        let _ = valid_node_ids;
+    }
+
+    edges
+}
+
+fn extract_trigger_targets(content: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in content.lines() {
+        let t = line.trim_start();
+        if let Some(rest) = t.strip_prefix("- run:") {
+            let v = rest.trim().trim_matches('"').trim_matches('\'');
+            for token in v.split_whitespace() {
+                if (token.starts_with("./") || token.starts_with("../"))
+                    && !token.contains(':')
+                {
+                    // Strip leading ./ so the target matches scan paths.
+                    let cleaned = token
+                        .trim_start_matches("./")
+                        .trim_start_matches("../");
+                    out.push(cleaned.to_string());
+                }
+            }
+        } else if let Some(rest) = t.strip_prefix("script:") {
+            let v = rest.trim().trim_matches('"').trim_matches('\'');
+            if (v.starts_with("./") || v.starts_with("../")) && !v.contains(' ') {
+                let cleaned = v
+                    .trim_start_matches("./")
+                    .trim_start_matches("../");
+                out.push(cleaned.to_string());
+            }
+        }
+    }
+    out
+}
+
+fn extract_serve_targets(content: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    // Walk each container block: collect name + image pairs, emit
+    // a synthesised path `src/<name>.{ts,py,go}` per pair.
+    let mut current_image: Option<String> = None;
+    let mut current_name: Option<String> = None;
+    for line in content.lines() {
+        let t = line.trim_start();
+        // Strip leading "- " if present (YAML list item)
+        let t = t.strip_prefix("- ").unwrap_or(t);
+        if let Some(rest) = t.strip_prefix("image:") {
+            let v = rest.trim().trim_matches('"').trim_matches('\'');
+            if !v.is_empty() {
+                current_image = Some(v.to_string());
+            }
+        }
+        if let Some(rest) = t.strip_prefix("name:") {
+            let v = rest.trim().trim_matches('"').trim_matches('\'');
+            if !v.is_empty() {
+                current_name = Some(v.to_string());
+            }
+        }
+        if let (Some(name), Some(_image)) = (&current_name, &current_image) {
+            // Avoid emitting duplicates for repeated lines
+            out.push(format!("src/{}.ts", name));
+            out.push(format!("src/{}.py", name));
+            out.push(format!("src/{}.go", name));
+            current_name = None;
+            current_image = None;
+        }
+    }
+    out
+}
+
+fn extract_provisions_targets(content: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    // resource "<type>" "<name>" { ... }
+    let mut lines = content.lines().peekable();
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("resource ") {
+            // resource "<type>" "<name>"
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            // parts[0] = "<type>", parts[1] = "<name>", parts[2] = "{"
+            if parts.len() >= 3 {
+                let type_name = parts[0].trim_matches('"');
+                let resource_name = parts[1].trim_matches('"');
+                // Synthesize a "type" path — matches UA convention
+                out.push(format!("infra/{}/{}", type_name, resource_name));
+            }
+        }
+    }
+    out
+}
+
+fn is_sql_migration(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let filename = lower.rsplit_once('/').map(|(_, f)| f).unwrap_or(lower.as_str());
+    if !filename.ends_with(".sql") {
+        return false;
+    }
+    // migrations/ prefix (with or without leading slash) OR numeric
+    // prefix convention (0001_*.sql).
+    let dir = lower.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    dir.contains("migrations")
+        || dir.ends_with("migrations")
+        || filename.starts_with("migration")
+}
+
+fn extract_migration_targets(content: &str, scan: &ScanResult) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut tables = std::collections::BTreeSet::new();
+    for line in content.lines() {
+        let upper = line.trim_start().to_ascii_uppercase();
+        // Check longer/more-specific prefixes first so `CREATE TABLE
+        // IF NOT EXISTS` doesn't match `CREATE TABLE` and then mistake
+        // "IF" for the table name.
+        let after = if let Some(rest) = upper.strip_prefix("CREATE TABLE IF NOT EXISTS") {
+            Some(rest)
+        } else if let Some(rest) = upper.strip_prefix("CREATE TABLE") {
+            Some(rest)
+        } else if let Some(rest) = upper.strip_prefix("ALTER TABLE") {
+            Some(rest)
+        } else if let Some(rest) = upper.strip_prefix("DROP TABLE") {
+            Some(rest)
+        } else {
+            None
+        };
+        if let Some(rest) = after {
+            // First non-quoted word is the table name
+            let raw = rest.trim().trim_matches('"').trim_matches('`');
+            let table = raw
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_matches('"')
+                .trim_matches('`')
+                .trim_matches(';')
+                .to_string();
+            if !table.is_empty() && table != "IF" {
+                tables.insert(table.to_ascii_lowercase());
+            }
+        }
+    }
+    // Map each table name to plausible consumer files
+    for table in tables {
+        // Try both the exact name and a singular form (users → user,
+        // posts → post) so model files named `user.ts` match.
+        let candidates = vec![table.clone(), table.trim_end_matches('s').to_string()];
+        for f in &scan.files {
+            let lower = f.path.to_ascii_lowercase();
+            let ext_ok = lower.ends_with(".ts")
+                || lower.ends_with(".py")
+                || lower.ends_with(".go")
+                || lower.ends_with(".java")
+                || lower.ends_with(".kt");
+            if !ext_ok {
+                continue;
+            }
+            if candidates.iter().any(|c| lower.contains(c)) {
+                out.push(f.path.clone());
+                if out.len() >= 50 {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -777,6 +1650,10 @@ mod tests {
     use crate::commands::code_wiki_scanner::{ScannedFile, ScanStats};
 
     fn make_scan(paths: &[&str]) -> ScanResult {
+        make_scan_at(paths, ".".to_string())
+    }
+
+    fn make_scan_at(paths: &[&str], project_root: String) -> ScanResult {
         let files: Vec<ScannedFile> = paths
             .iter()
             .map(|p| ScannedFile {
@@ -787,7 +1664,7 @@ mod tests {
             })
             .collect();
         ScanResult {
-            project_root: ".".to_string(),
+            project_root,
             total_files: files.len() as u32,
             filtered_by_ignore: 0,
             estimated_complexity: "moderate".to_string(),
@@ -979,5 +1856,213 @@ mod tests {
         let path = std::env::temp_dir().join(unique);
         std::fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    // -- P2-A: nine additional edge type tests --
+
+    #[test]
+    fn extract_pub_sub_pairs_subscriber_with_publisher() {
+        // Both subscriber and publisher share the "user.created"
+        // basename and a shared events/ module exists.
+        let scan = make_scan(&[
+            "src/subscribers/user-created.subscriber.ts",
+            "src/publishers/user-created.publisher.ts",
+            "src/events/user-created.ts",
+        ]);
+        let ids = ids_for(&scan);
+        let edges = extract_pub_sub(&scan, &ids);
+        // Expect subscribes: subscriber -> event module
+        assert!(edges
+            .iter()
+            .any(|e| e.source == "file:src/subscribers/user-created.subscriber.ts"
+                && e.target == "file:src/events/user-created.ts"
+                && e.kind == "subscribes"));
+        // Expect publishes: publisher -> event module (or to each subscriber)
+        assert!(edges
+            .iter()
+            .any(|e| e.source == "file:src/publishers/user-created.publisher.ts"
+                && e.kind == "publishes"));
+    }
+
+    #[test]
+    fn extract_pub_sub_direct_pair_without_event_bus() {
+        // No shared event module — subscriber connects directly to publisher.
+        let scan = make_scan(&[
+            "src/subscribers/foo.subscriber.ts",
+            "src/publishers/foo.publisher.ts",
+        ]);
+        let ids = ids_for(&scan);
+        let edges = extract_pub_sub(&scan, &ids);
+        assert!(edges
+            .iter()
+            .any(|e| e.source == "file:src/subscribers/foo.subscriber.ts"
+                && e.target == "file:src/publishers/foo.publisher.ts"
+                && e.kind == "subscribes"));
+    }
+
+    #[test]
+    fn extract_routes_nginx_to_upstream_service() {
+        let dir = tempdir();
+        std::fs::write(
+            &dir.join("nginx.conf"),
+            "server {\n  proxy_pass http://auth-service/;\n}\n",
+        )
+        .unwrap();
+        let scan = make_scan_at(
+            &["nginx.conf", "services/auth-service.ts"],
+            dir.to_string_lossy().to_string(),
+        );
+        let ids = ids_for(&scan);
+        let edges = extract_routes_and_middleware(&scan, &dir, &ids);
+        assert!(edges
+            .iter()
+            .any(|e| e.source == "file:nginx.conf"
+                && e.target == "file:services/auth-service.ts"
+                && e.kind == "routes"));
+    }
+
+    #[test]
+    fn extract_routes_middleware_via_import_map() {
+        let scan = make_scan(&[
+            "src/middleware/auth.ts",
+            "src/routes/index.ts",
+        ]);
+        // import_map: routes/index.ts imports middleware/auth.ts
+        let mut scan = scan;
+        scan.import_map.insert(
+            "src/routes/index.ts".to_string(),
+            vec!["src/middleware/auth.ts".to_string()],
+        );
+        let ids = ids_for(&scan);
+        let dir = tempdir();
+        let edges = extract_routes_and_middleware(&scan, &dir, &ids);
+        assert!(edges
+            .iter()
+            .any(|e| e.source == "file:src/middleware/auth.ts"
+                && e.target == "file:src/routes/index.ts"
+                && e.kind == "middleware"));
+    }
+
+    #[test]
+    fn extract_schema_graphql_to_resolvers() {
+        let scan = make_scan(&[
+            "src/schema.graphql",
+            "src/resolvers/user.ts",
+            "src/resolvers/post.ts",
+        ]);
+        let ids = ids_for(&scan);
+        let edges = extract_schema_definitions(&scan, &ids);
+        assert_eq!(edges.len(), 2, "graphql schema → 2 resolver files");
+        assert!(edges
+            .iter()
+            .all(|e| e.source == "file:src/schema.graphql" && e.kind == "defines_schema"));
+    }
+
+    #[test]
+    fn extract_infrastructure_triggers_gh_actions() {
+        let dir = tempdir();
+        let workflow = dir.join(".github/workflows/ci.yml");
+        std::fs::create_dir_all(workflow.parent().unwrap()).unwrap();
+        std::fs::write(
+            &workflow,
+            "name: CI\non: push\njobs:\n  test:\n    steps:\n      - run: ./scripts/test.sh\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(dir.join("scripts/test.sh"), "echo hello").unwrap();
+        let scan = make_scan_at(
+            &[".github/workflows/ci.yml", "scripts/test.sh"],
+            dir.to_string_lossy().to_string(),
+        );
+        let ids = ids_for(&scan);
+        let edges = extract_infrastructure_topology(&scan, &dir, &ids);
+        assert!(edges
+            .iter()
+            .any(|e| e.source == "file:.github/workflows/ci.yml"
+                && e.target == "file:scripts/test.sh"
+                && e.kind == "triggers"));
+    }
+
+    #[test]
+    fn extract_infrastructure_serves_k8s_deployment() {
+        let dir = tempdir();
+        std::fs::create_dir_all(dir.join("k8s")).unwrap();
+        std::fs::write(
+            &dir.join("k8s/deployment.yaml"),
+            "apiVersion: apps/v1\nkind: Deployment\nspec:\n  template:\n    spec:\n      containers:\n        - name: api\n          image: myorg/api:1.0\n",
+        )
+        .unwrap();
+        let scan = make_scan_at(
+            &["k8s/deployment.yaml", "src/api.ts"],
+            dir.to_string_lossy().to_string(),
+        );
+        let ids = ids_for(&scan);
+        let edges = extract_infrastructure_topology(&scan, &dir, &ids);
+        // name: api → src/api.ts (synthesized path)
+        assert!(edges
+            .iter()
+            .any(|e| e.source == "file:k8s/deployment.yaml"
+                && e.target == "file:src/api.ts"
+                && e.kind == "serves"));
+    }
+
+    #[test]
+    fn extract_infrastructure_provisions_terraform() {
+        let dir = tempdir();
+        std::fs::write(
+            &dir.join("main.tf"),
+            r#"
+resource "aws_db_instance" "main" {
+  engine = "postgres"
+}
+"#,
+        )
+        .unwrap();
+        let scan = make_scan_at(&["main.tf"], dir.to_string_lossy().to_string());
+        let ids = ids_for(&scan);
+        let edges = extract_infrastructure_topology(&scan, &dir, &ids);
+        // Synthesized path "infra/<type>/<name>"
+        assert!(edges
+            .iter()
+            .any(|e| e.source == "file:main.tf"
+                && e.target == "file:infra/aws_db_instance/main"
+                && e.kind == "provisions"));
+    }
+
+    #[test]
+    fn extract_infrastructure_migrates_sql_to_table_model() {
+        let dir = tempdir();
+        std::fs::create_dir_all(dir.join("migrations")).unwrap();
+        std::fs::write(
+            &dir.join("migrations/001_init.sql"),
+            "CREATE TABLE users (id INT PRIMARY KEY);\n",
+        )
+        .unwrap();
+        let scan = make_scan_at(
+            &["migrations/001_init.sql", "models/user.ts"],
+            dir.to_string_lossy().to_string(),
+        );
+        let ids = ids_for(&scan);
+        let edges = extract_infrastructure_topology(&scan, &dir, &ids);
+        assert!(edges
+            .iter()
+            .any(|e| e.source == "file:migrations/001_init.sql"
+                && e.target == "file:models/user.ts"
+                && e.kind == "migrates"));
+    }
+
+    #[test]
+    fn extract_pub_sub_skips_files_without_role() {
+        // Regular files (no subscribers/ or publishers/ prefix) emit no
+        // pub/sub edges even if other pub/sub files exist.
+        let scan = make_scan(&[
+            "src/utils.ts",
+            "src/subscribers/foo.subscriber.ts",
+            "src/publishers/foo.publisher.ts",
+            "src/events/foo.ts",
+        ]);
+        let ids = ids_for(&scan);
+        let edges = extract_pub_sub(&scan, &ids);
+        assert!(edges.iter().all(|e| !e.source.contains("utils.ts")));
     }
 }
