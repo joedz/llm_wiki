@@ -798,6 +798,7 @@ pub fn scan_result_for_knowledge(files: &[ScannedKbFile]) -> ScanResult {
         project_description: format!("Knowledge base with {} articles", files.len()),
         frameworks: Vec::new(),
         git_commit_hash: String::new(),
+        import_map: BTreeMap::new(),
     }
 }
 

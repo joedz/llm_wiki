@@ -126,6 +126,12 @@ pub struct PipelineSummary {
     /// ran Phase 8.5 with `review_llm` set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_narrative: Option<serde_json::Value>,
+    /// Optional Phase 5.5 LLM assemble-reviewer report
+    /// (`types_remapped`, `complexity_remapped`,
+    /// `cross_batch_edges_added`, `notes`). Populated when the
+    /// pipeline ran with `assemble_review_llm`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assemble_review: Option<serde_json::Value>,
 }
 
 #[derive(Default)]
@@ -348,13 +354,23 @@ pub async fn code_wiki_run_pipeline(
     repo_name: String,
     llm: Option<LlmRequestSpec>,
     review_llm: Option<LlmRequestSpec>,
+    assemble_review_llm: Option<LlmRequestSpec>,
     app: AppHandle,
     state: tauri::State<'_, Arc<PipelineRegistry>>,
 ) -> Result<(), String> {
     let registry = state.inner().clone();
     let app_for_task = app.clone();
     tokio::spawn(async move {
-        let result = run_pipeline(app_for_task, registry, project_path, repo_name, llm, review_llm).await;
+        let result = run_pipeline(
+            app_for_task,
+            registry,
+            project_path,
+            repo_name,
+            llm,
+            review_llm,
+            assemble_review_llm,
+        )
+        .await;
         if let Err(e) = result {
             eprintln!("[code-wiki pipeline] run_pipeline failed: {e}");
         }
@@ -379,6 +395,7 @@ pub async fn run_pipeline(
     repo_name: String,
     llm: Option<LlmRequestSpec>,
     review_llm: Option<LlmRequestSpec>,
+    assemble_review_llm: Option<LlmRequestSpec>,
 ) -> Result<PipelineSummary, String> {
     // Use project_path as the stable pipelineId — it must match what the
     // frontend store sets in begin() so all events (phase/batch/done) are
@@ -399,6 +416,7 @@ pub async fn run_pipeline(
         &repo_for_task,
         llm,
         review_llm,
+        assemble_review_llm,
         &cancel,
         Instant::now(),
     )
@@ -417,6 +435,7 @@ async fn run_pipeline_orchestrator(
     repo_name: &str,
     llm: Option<LlmRequestSpec>,
     review_llm: Option<LlmRequestSpec>,
+    assemble_review_llm: Option<LlmRequestSpec>,
     cancel: &AtomicBool,
     started: Instant,
 ) -> Result<PipelineSummary, String> {
@@ -599,8 +618,43 @@ async fn run_pipeline_orchestrator(
     }
     emit_phase(app, pipeline_id, 5, "Assemble", "done");
 
-    // --- Phase 6: architecture (assign layers) ---
+    // --- Phase 5.5: assemble-reviewer (LLM post-merge cleanup) ---
     let mut graph = graph;
+    let mut assemble_review_value: Option<serde_json::Value> = None;
+    if let Some(ref spec) = assemble_review_llm {
+        if check_cancel(cancel) {
+            return Ok(cancelled_summary(
+                pipeline_id,
+                project_path,
+                repo_name,
+                started,
+                &warnings,
+            ));
+        }
+        emit_phase(app, pipeline_id, 5, "Assemble review (LLM)", "running");
+        let review = crate::commands::code_wiki_assemble_llm::assemble_review_llm(
+            &mut graph,
+            &asm_report,
+            &scan,
+            spec,
+        )
+        .await;
+        assemble_review_value = Some(serde_json::to_value(&review).unwrap_or_default());
+        let summary = format!(
+            "Assemble review: {} types remapped, {} complexities remapped, {} cross-batch imports added",
+            review.types_remapped, review.complexity_remapped, review.cross_batch_edges_added
+        );
+        warnings.push(summary.clone());
+        emit_warning(app, pipeline_id, 5, &summary);
+        for note in &review.notes {
+            let m = format!("Assemble review note: {note}");
+            warnings.push(m.clone());
+            emit_warning(app, pipeline_id, 5, &m);
+        }
+        emit_phase(app, pipeline_id, 5, "Assemble review (LLM)", "done");
+    }
+
+    // --- Phase 6: architecture (assign layers) ---
     if check_cancel(cancel) {
         return Ok(cancelled_summary(pipeline_id, project_path, repo_name, started, &warnings));
     }
@@ -723,7 +777,7 @@ async fn run_pipeline_orchestrator(
         review_approved: review_narrative
             .as_ref()
             .and_then(|v| v.get("approved").and_then(|x| x.as_bool())),
-        assemble_review: None,
+        assemble_review: assemble_review_value.clone(),
         changed_file_count: None,
         unchanged_file_count: None,
         removed_file_count: None,
@@ -750,6 +804,7 @@ async fn run_pipeline_orchestrator(
         cancelled: false,
         warnings: warnings.clone(),
         review_narrative: review_narrative.clone(),
+        assemble_review: assemble_review_value.clone(),
     };
 
     // Auto-refresh the diff overlay so the dashboard's diff view
@@ -905,6 +960,7 @@ fn cancelled_summary(
         cancelled: true,
         warnings: warnings.to_vec(),
         review_narrative: None,
+        assemble_review: None,
     }
 }
 

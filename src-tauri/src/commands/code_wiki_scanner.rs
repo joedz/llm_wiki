@@ -244,6 +244,11 @@ pub struct ScanResult {
     pub frameworks: Vec<String>,
     /// Git HEAD at scan time, or empty if not a git repo.
     pub git_commit_hash: String,
+    /// Per-file list of imported files (relative paths). Populated
+    /// by `extract_import_map` when callers ask for it. Defaults to
+    /// empty when older scan-result files don't carry it.
+    #[serde(default)]
+    pub import_map: BTreeMap<String, Vec<String>>,
 }
 
 // --- Phase 1 deterministic execution ------------------------------------
@@ -313,6 +318,7 @@ pub fn scan_project_inner(project_root: &Path) -> Result<ScanResult, String> {
         project_description,
         frameworks,
         git_commit_hash,
+        import_map: BTreeMap::new(),
     })
 }
 

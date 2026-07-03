@@ -4,6 +4,7 @@ pub mod code_wiki;
 pub mod code_wiki_analyzer;
 pub mod code_wiki_architecture;
 pub mod code_wiki_assembler;
+pub mod code_wiki_assemble_llm;
 pub mod code_wiki_dashboard;
 pub mod code_wiki_batcher;
 pub mod code_wiki_chat;

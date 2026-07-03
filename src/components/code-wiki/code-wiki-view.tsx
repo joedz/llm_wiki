@@ -198,14 +198,16 @@ export function CodeWikiView() {
   )
 
   const analyzeRepo = useCallback(
-    async (repoName: string) => {
+    async (repoName: string, opts?: { assembleReview?: boolean }) => {
       if (!project) return
       const projectPath = normalizePath(project.path)
       beginPipeline(projectPath, repoName)
       const llmConfig = useWikiStore.getState().llmConfig
       const llm = llmSpecFromConfig(llmConfig)
       try {
-        await startPipeline(projectPath, repoName, llm ?? undefined)
+        await startPipeline(projectPath, repoName, llm ?? undefined, {
+          assembleReviewLl: opts?.assembleReview ? llm : undefined,
+        })
       } catch (err) {
         // Surface the error via a synthetic warning event so the
         // progress panel reflects the failure rather than hanging

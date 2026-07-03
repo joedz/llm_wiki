@@ -34,6 +34,21 @@ export interface PipelineSummary {
     warnings: string[]
     narrative: string
   } | null
+  /**
+   * Optional Phase 5.5 LLM assemble-reviewer report
+   * (`types_remapped`, `complexity_remapped`,
+   * `cross_batch_edges_added`, `notes`). Populated when the
+   * pipeline ran with `assembleReviewLl`.
+   */
+  assembleReview?: {
+    fixedSectionOk: boolean
+    nodesRecovered: number
+    edgesRestored: number
+    crossBatchEdgesAdded: number
+    typesRemapped: number
+    complexityRemapped: number
+    notes: string[]
+  } | null
 }
 
 export type PhaseStatus = "running" | "done" | "error"
@@ -58,13 +73,20 @@ export function startPipeline(
   projectPath: string,
   repoName: string,
   llm?: LlmRequestSpec,
-  options?: { reviewLl?: LlmRequestSpec },
+  options?: {
+    reviewLl?: LlmRequestSpec
+    /** Run Phase 5.5 LLM assemble-reviewer after deterministic
+     *  assemble; useful for cleaning up unknown node kinds /
+     *  complexities / cross-batch imports. */
+    assembleReviewLl?: LlmRequestSpec
+  },
 ): Promise<void> {
   return invoke("code_wiki_run_pipeline", {
     projectPath,
     repoName,
     llm,
     reviewLl: options?.reviewLl,
+    assembleReviewLl: options?.assembleReviewLl,
   })
 }
 
