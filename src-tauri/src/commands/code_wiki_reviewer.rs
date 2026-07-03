@@ -212,6 +212,7 @@ mod tests {
             kind: "contains".to_string(),
             direction: "forward".to_string(),
             weight: 1.0,
+            ..Default::default()
         }
     }
 

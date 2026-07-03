@@ -1,0 +1,101 @@
+// TS client for the code-wiki **domain** pipeline.
+//
+// `codewiki-domain-progress` / `codewiki-domain-done` carry
+// domain-pipeline-specific events. Schema mirrors `knowledge.ts`
+// closely but the Rust side emits slightly different fields
+// (no batch events for domain — only phase + warning + done).
+
+import { invoke } from "@tauri-apps/api/core"
+import { listen, type UnlistenFn } from "@tauri-apps/api/event"
+
+export const DOMAIN_EVENT = "codewiki-domain-progress"
+export const DOMAIN_DONE_EVENT = "codewiki-domain-done"
+
+export interface DomainRunSummary {
+  pipelineId: string
+  projectPath: string
+  repoName: string
+  finalGraphPath: string
+  finalMetaPath: string
+  nodeCount: number
+  edgeCount: number
+  kind: "domain"
+  durationMs: number
+  warnings: string[]
+  derivedFromGraph: boolean
+  usedLlm: boolean
+}
+
+export type PhaseStatus = "running" | "done" | "error"
+
+export type DomainProgressEvent =
+  | {
+      kind: "started"
+      pipelineId: string
+      repoName: string
+      totalPhases: number
+    }
+  | {
+      kind: "phase"
+      pipelineId: string
+      phase: number
+      label: string
+      status: PhaseStatus
+    }
+  | {
+      kind: "warning"
+      pipelineId: string
+      phase: number
+      message: string
+    }
+
+export function runDomainPipeline(
+  projectPath: string,
+  repoName: string,
+  llm?: LlmRequestSpec,
+): Promise<void> {
+  return invoke("code_wiki_run_domain_pipeline", {
+    projectPath,
+    repoName,
+    llm,
+  })
+}
+
+export function getDomainGraph(
+  projectPath: string,
+  repoName: string,
+): Promise<unknown | null> {
+  return invoke("code_wiki_get_domain_graph", {
+    projectPath,
+    repoName,
+  })
+}
+
+export function listDomainRepos(projectPath: string): Promise<string[]> {
+  return invoke("code_wiki_list_domain_repos", { projectPath })
+}
+
+export interface LlmRequestSpec {
+  provider: "anthropic" | "openai" | "ollama" | "custom"
+  apiKey: string
+  model: string
+  baseUrl?: string
+  maxTokens?: number
+  temperature?: number
+}
+
+export function subscribeDomainProgress(
+  handler: (event: DomainProgressEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<DomainProgressEvent>(DOMAIN_EVENT, (e) => {
+    handler(e.payload)
+  })
+}
+
+export function subscribeDomainDone(
+  handler: (summary: DomainRunSummary) => void,
+): Promise<UnlistenFn> {
+  return listen<DomainRunSummary>(DOMAIN_DONE_EVENT, (e) => {
+    handler(e.payload)
+  })
+}

@@ -489,6 +489,7 @@ pub fn emit_base_knowledge_graph(
                 kind: "categorized_under".to_string(),
                 direction: "forward".to_string(),
                 weight: 1.0,
+                ..Default::default()
             });
         }
     }
@@ -532,6 +533,7 @@ pub fn emit_base_knowledge_graph(
                 kind: "cites".to_string(),
                 direction: "forward".to_string(),
                 weight: 0.8,
+                ..Default::default()
             });
         }
     }
@@ -558,6 +560,7 @@ pub fn emit_base_knowledge_graph(
             kind: "cites".to_string(),
             direction: "forward".to_string(),
             weight: 0.7,
+            ..Default::default()
         });
     }
 
@@ -635,6 +638,7 @@ pub fn apply_llm_enrichments(
                             kind: "cites".to_string(),
                             direction: "forward".to_string(),
                             weight: 0.7,
+                            ..Default::default()
                         });
                     }
                 }
@@ -656,6 +660,7 @@ pub fn apply_llm_enrichments(
             kind: e.kind.clone(),
             direction: "forward".to_string(),
             weight: e.weight,
+            ..Default::default()
         });
     }
 }

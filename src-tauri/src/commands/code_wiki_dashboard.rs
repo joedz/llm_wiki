@@ -28,6 +28,7 @@ const PROTECTED_PATHS: &[&str] = &[
     "/meta.json",
     "/config.json",
     "/diff-overlay.json",
+    "/domain-graph.json",
 ];
 const SPATIAL_FILE_FALLBACK: &str = "/index.html";
 const BIND_HOST: &str = "127.0.0.1";
@@ -274,6 +275,17 @@ fn serve_dashboard(
                         respond_with(request, 200, mime_for("diff-overlay.json"), bytes);
                     } else {
                         respond_status(request, 404, "diff-overlay.json not found");
+                    }
+                }
+                "/domain-graph.json" => {
+                    let file = crate::commands::code_wiki::domain_graph_path_for(
+                        &project_path,
+                        &repo_name,
+                    );
+                    if let Ok(bytes) = fs::read(&file) {
+                        respond_with(request, 200, mime_for("domain-graph.json"), bytes);
+                    } else {
+                        respond_status(request, 404, "domain-graph.json not found");
                     }
                 }
                 _ => respond_status(request, 404, "not found"),

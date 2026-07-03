@@ -284,7 +284,7 @@ pub struct NodeLocation {
     pub end_line: u32,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct GraphEdge {
     pub source: String,
     pub target: String,
@@ -292,6 +292,11 @@ pub struct GraphEdge {
     pub kind: String,
     pub direction: String,
     pub weight: f32,
+    /// Optional human-readable description (used by cross_domain
+    /// edges in domain graphs and any LLM-emitted edge). Omitted
+    /// from JSON when absent to keep the codebase graph slim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 fn codegraph_to_ua_kind(codegraph_kind: &str) -> Option<&'static str> {
@@ -708,17 +713,23 @@ async fn run_pipeline_orchestrator(
         emit_warning(app, pipeline_id, 9, &msg);
         return Err(msg);
     }
-    let meta = serde_json::json!({
-        "lastAnalyzedAt": now_iso(),
-        "gitCommitHash": scan.git_commit_hash,
-        "version": "codewiki-1.0.0",
-        "analyzedFiles": scan.files.iter().filter(|f| f.file_category == "code").count(),
-    });
+    let meta = crate::commands::code_wiki_save::PipelineMeta {
+        last_analyzed_at: now_iso(),
+        git_commit_hash: scan.git_commit_hash.clone(),
+        version: "codewiki-1.0.0".to_string(),
+        kind: "codebase".to_string(),
+        analyzed_files: scan.files.iter().filter(|f| f.file_category == "code").count() as u32,
+        review_narrative: review_narrative.clone(),
+        review_approved: review_narrative
+            .as_ref()
+            .and_then(|v| v.get("approved").and_then(|x| x.as_bool())),
+        assemble_review: None,
+        changed_file_count: None,
+        unchanged_file_count: None,
+        removed_file_count: None,
+    };
     let meta_path = repo_dir.join(META_FILE);
-    if let Err(e) = write_atomic(
-        &meta_path,
-        &serde_json::to_vec_pretty(&meta).map_err(|e| format!("serialize meta: {e}"))?,
-    ) {
+    if let Err(e) = crate::commands::code_wiki_save::write_meta(&meta_path, &meta) {
         warnings.push(format!("meta.json write failed: {e}"));
         emit_warning(app, pipeline_id, 9, &warnings.last().unwrap());
     }

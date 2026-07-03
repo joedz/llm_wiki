@@ -622,6 +622,7 @@ pub fn build_graph_via_tree_sitter(
                 kind: "documents".to_string(),
                 direction: "forward".to_string(),
                 weight: 1.0,
+                ..Default::default()
             });
         }
     }
@@ -647,6 +648,7 @@ pub fn build_graph_via_tree_sitter(
                 kind: kind.to_string(),
                 direction: "forward".to_string(),
                 weight: 1.0,
+                ..Default::default()
             });
         }
     };

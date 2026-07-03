@@ -63,6 +63,36 @@ pub fn knowledge_meta_path_for(project_path: &Path, repo_name: &str) -> PathBuf 
     knowledge_repo_root(project_path, repo_name).join(META_FILE)
 }
 
+/// Sibling of `wiki/code_wiki/<repo>/knowledge-graph.json` for
+/// `/understand-domain` output. Lives next to the codebase graph
+/// because the dashboard serves both from the same dev server.
+pub fn domain_graph_path_for(project_path: &Path, repo_name: &str) -> PathBuf {
+    repo_root(project_path, repo_name).join("domain-graph.json")
+}
+
+pub fn domain_meta_path_for(project_path: &Path, repo_name: &str) -> PathBuf {
+    repo_root(project_path, repo_name).join("domain-meta.json")
+}
+
+/// Sync helper: read the codebase knowledge-graph.json and
+/// deserialize into the canonical `KnowledgeGraph` shape. Returns
+/// `Ok(None)` when the file is missing, `Err(...)` on parse
+/// failure. Used by `/understand-domain` to derive context cheaply
+/// without spawning a thread.
+pub fn code_wiki_get_graph_inner(
+    project_path: &Path,
+    repo_name: &str,
+) -> Result<Option<crate::commands::code_wiki_pipeline::KnowledgeGraph>, String> {
+    let path = graph_path_for(project_path, repo_name);
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => serde_json::from_str(&raw)
+            .map(Some)
+            .map_err(|e| format!("parse graph: {e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("read graph: {e}")),
+    }
+}
+
 pub fn index_path_for(project_path: &Path) -> PathBuf {
     project_path.join(WIKI_CODE_WIKI_DIR).join(INDEX_FILE)
 }
@@ -256,6 +286,46 @@ pub async fn code_wiki_list_knowledge_repos(project_path: String) -> Result<Vec<
     })
     .await
     .map_err(|e| format!("join error: {}", e))?
+}
+
+#[tauri::command]
+pub async fn code_wiki_get_domain_graph(
+    project_path: String,
+    repo_name: String,
+) -> Result<Option<serde_json::Value>, String> {
+    use crate::commands::code_wiki_domain::DomainGraph;
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = domain_graph_path_for(Path::new(&project_path), &repo_name);
+        match fs::read_to_string(&path) {
+            Ok(raw) => {
+                let parsed: DomainGraph = serde_json::from_str(&raw)
+                    .map_err(|e| format!("parse domain graph: {e}"))?;
+                serde_json::to_value(&parsed).map(Some).map_err(|e| format!("re-serialize: {e}"))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("read domain graph: {e}")),
+        }
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn code_wiki_list_domain_repos(project_path: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = std::path::Path::new(&project_path).join(WIKI_CODE_WIKI_DIR);
+        match std::fs::read_dir(&root) {
+            Ok(entries) => Ok(entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().join("domain-graph.json").is_file())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect::<Vec<_>>()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
+            Err(e) => Err(format!("read domain repos: {e}")),
+        }
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
 }
 
 #[derive(Debug, PartialEq, Eq)]

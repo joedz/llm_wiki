@@ -12,17 +12,24 @@ import {
   Clock,
   Sparkles,
   GitCompare,
+  BookOpen,
+  Network,
+  Loader2,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useWikiStore } from "@/stores/wiki-store"
 import { usePipelineStore } from "@/stores/code-wiki-pipeline-store"
 import { startPipeline, llmSpecFromConfig, hasLlmConfig } from "@/lib/code-wiki/pipeline"
+import { useKnowledgeStore } from "@/stores/code-wiki-knowledge-store"
+import { runKnowledgePipeline, listKnowledgeRepos } from "@/lib/code-wiki/knowledge"
+import { runDomainPipeline, listDomainRepos } from "@/lib/code-wiki/domain"
 import {
   refreshDiffOverlay,
   isOverlayInteresting,
   type DiffOverlay,
 } from "@/lib/code-wiki/diff"
 import { PipelineProgress } from "./pipeline-progress"
+import { KnowledgeProgress } from "./knowledge-progress"
 import { PersonaSelector } from "./persona-selector"
 import { useCodeWikiPersonaStore } from "@/stores/code-wiki-persona-store"
 import { normalizePath } from "@/lib/path-utils"
@@ -76,12 +83,27 @@ export function CodeWikiView() {
   // here in addition to anywhere else.)
   useEffect(() => {
     usePipelineStore.getState().startListen()
+    useKnowledgeStore.getState().startListen()
   }, [])
   const pipelineRun = usePipelineStore((s) =>
     project ? s.byProject[project.path] : undefined,
   )
+  const knowledgeRun = useKnowledgeStore((s) =>
+    project ? s.byProject[project.path] : undefined,
+  )
+  const [domainRun, setDomainRun] = useState<{
+    status: "idle" | "running" | "done" | "error"
+    repoName?: string
+    message?: string
+    durationMs?: number
+    nodeCount?: number
+    edgeCount?: number
+  }>({ status: "idle" })
   const beginPipeline = usePipelineStore((s) => s.begin)
+  const beginKnowledge = useKnowledgeStore((s) => s.begin)
   const [repos, setRepos] = useState<RepoStatus[]>([])
+  const [knowledgeRepos, setKnowledgeRepos] = useState<string[]>([])
+  const [domainRepos, setDomainRepos] = useState<string[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [diffByRepo, setDiffByRepo] = useState<Record<string, DiffOverlay | null>>({})
@@ -96,10 +118,16 @@ export function CodeWikiView() {
     setLoading(true)
     setError(null)
     try {
-      const index = await invoke<{ repos: RepoStatus[] }>("code_wiki_get_index", {
-        projectPath: project.path,
-      })
+      const [index, knowledgeRepoList, domainRepoList] = await Promise.all([
+        invoke<{ repos: RepoStatus[] }>("code_wiki_get_index", {
+          projectPath: project.path,
+        }),
+        listKnowledgeRepos(project.path).catch(() => []),
+        listDomainRepos(project.path).catch(() => []),
+      ])
       setRepos(index.repos)
+      setKnowledgeRepos(knowledgeRepoList)
+      setDomainRepos(domainRepoList)
     } catch (err) {
       setError(String(err))
       setRepos([])
@@ -206,6 +234,86 @@ export function CodeWikiView() {
     [project, beginPipeline],
   )
 
+  const buildKnowledge = useCallback(
+    async (repoName: string) => {
+      if (!project) return
+      const projectPath = normalizePath(project.path)
+      beginKnowledge(projectPath, repoName)
+      const llmConfig = useWikiStore.getState().llmConfig
+      const llm = llmSpecFromConfig(llmConfig)
+      try {
+        await runKnowledgePipeline(projectPath, repoName, llm ?? undefined)
+        setKnowledgeRepos((prev) =>
+          prev.includes(repoName) ? prev : [...prev, repoName],
+        )
+      } catch (err) {
+        useKnowledgeStore.setState((s) => {
+          const cur = s.byProject[projectPath]
+          if (!cur) return s
+          return {
+            byProject: {
+              ...s.byProject,
+              [projectPath]: {
+                ...cur,
+                result: "error",
+                phaseStatus: "error",
+                warnings: [...cur.warnings, `build failed: ${String(err)}`],
+              },
+            },
+          }
+        })
+      }
+    },
+    [project, beginKnowledge],
+  )
+
+  const buildDomain = useCallback(
+    async (repoName: string) => {
+      if (!project) return
+      const projectPath = normalizePath(project.path)
+      const started = Date.now()
+      setDomainRun({ status: "running", repoName })
+      const llmConfig = useWikiStore.getState().llmConfig
+      const llm = llmSpecFromConfig(llmConfig)
+      try {
+        await runDomainPipeline(projectPath, repoName, llm ?? undefined)
+        // Read back the summary from the just-written graph to get
+        // node/edge counts.
+        try {
+          const graph = (await invoke("code_wiki_get_domain_graph", {
+            projectPath,
+            repoName,
+          })) as { nodes?: unknown[]; edges?: unknown[] } | null
+          const nodeCount = Array.isArray(graph?.nodes) ? graph!.nodes!.length : 0
+          const edgeCount = Array.isArray(graph?.edges) ? graph!.edges!.length : 0
+          setDomainRun({
+            status: "done",
+            repoName,
+            nodeCount,
+            edgeCount,
+            durationMs: Date.now() - started,
+          })
+          setDomainRepos((prev) =>
+            prev.includes(repoName) ? prev : [...prev, repoName],
+          )
+        } catch {
+          setDomainRun({
+            status: "done",
+            repoName,
+            durationMs: Date.now() - started,
+          })
+        }
+      } catch (err) {
+        setDomainRun({
+          status: "error",
+          repoName,
+          message: String(err),
+        })
+      }
+    },
+    [project],
+  )
+
   const refreshDiff = useCallback(
     async (repoName: string) => {
       if (!project) return
@@ -291,6 +399,38 @@ export function CodeWikiView() {
         </div>
       )}
 
+      {project && knowledgeRun && (
+        <div className="border-b p-3">
+          <KnowledgeProgress projectPath={project.path} />
+        </div>
+      )}
+
+      {project && domainRun.status !== "idle" && (
+        <div className="border-b p-3 text-xs">
+          <div className="flex items-center gap-2">
+            {domainRun.status === "running" ? (
+              <Loader2 className="h-4 w-4 animate-spin text-primary" />
+            ) : domainRun.status === "done" ? (
+              <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+            ) : (
+              <AlertCircle className="h-4 w-4 text-destructive" />
+            )}
+            <span className="font-semibold">
+              {t("codeWiki.domain.title", "Domain graph")} · {domainRun.repoName}
+            </span>
+            {domainRun.status === "done" && domainRun.nodeCount !== undefined && (
+              <span className="text-muted-foreground">
+                {domainRun.nodeCount} domains/flows/steps · {domainRun.edgeCount ?? 0} edges
+                {domainRun.durationMs ? ` · ${domainRun.durationMs}ms` : ""}
+              </span>
+            )}
+            {domainRun.status === "error" && (
+              <span className="text-destructive">{domainRun.message}</span>
+            )}
+          </div>
+        </div>
+      )}
+
       <div className="flex-1 overflow-auto p-4">
         {repos.length === 0 ? (
           <EmptyState onBuild={async () => {
@@ -326,6 +466,17 @@ export function CodeWikiView() {
                   setOpenDiff((s) => ({ ...s, [repo.name]: !(s[repo.name] ?? false) }))
                 }
                 onRefreshDiff={() => refreshDiff(repo.name)}
+                onBuildKnowledge={() => buildKnowledge(repo.name)}
+                onBuildDomain={() => buildDomain(repo.name)}
+                knowledgeBuilding={
+                  (useKnowledgeStore.getState().byProject[project?.path ?? ""]?.repoName === repo.name) &&
+                  useKnowledgeStore.getState().byProject[project?.path ?? ""]?.result === "running"
+                }
+                domainBuilding={
+                  domainRun.status === "running" && domainRun.repoName === repo.name
+                }
+                hasKnowledge={knowledgeRepos.includes(repo.name)}
+                hasDomain={domainRepos.includes(repo.name)}
                 copied={copiedRepo === repo.name}
               />
             ))}
@@ -362,6 +513,12 @@ function RepoRow({
   onCopyUrl,
   onToggleDiff,
   onRefreshDiff,
+  onBuildKnowledge,
+  onBuildDomain,
+  knowledgeBuilding,
+  domainBuilding,
+  hasKnowledge,
+  hasDomain,
   copied,
 }: {
   repo: RepoStatus
@@ -376,6 +533,12 @@ function RepoRow({
   onCopyUrl: () => void
   onToggleDiff: () => void
   onRefreshDiff: () => void
+  onBuildKnowledge: () => void
+  onBuildDomain: () => void
+  knowledgeBuilding: boolean
+  domainBuilding: boolean
+  hasKnowledge: boolean
+  hasDomain: boolean
   copied: boolean
 }) {
   const { t } = useTranslation()
@@ -484,6 +647,38 @@ function RepoRow({
                 {diff.changedNodeIds.length + diff.affectedNodeIds.length}
               </span>
             )}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onBuildKnowledge}
+            disabled={knowledgeBuilding}
+            title={
+              hasKnowledge
+                ? t("codeWiki.rebuildKnowledge", "Rebuild knowledge graph")
+                : t("codeWiki.buildKnowledge", "Build knowledge graph")
+            }
+          >
+            <BookOpen className="mr-1 h-3.5 w-3.5" />
+            {knowledgeBuilding
+              ? t("codeWiki.buildingKnowledge", "Knowledge…")
+              : hasKnowledge
+                ? t("codeWiki.rebuildKnowledgeShort", "Rebuild KB")
+                : t("codeWiki.buildKnowledgeShort", "Build KB")}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onBuildDomain}
+            disabled={domainBuilding || !built}
+            title={t("codeWiki.buildDomain", "Extract business domain (domains / flows / steps)")}
+          >
+            <Network className="mr-1 h-3.5 w-3.5" />
+            {domainBuilding
+              ? t("codeWiki.buildingDomain", "Domain…")
+              : hasDomain
+                ? t("codeWiki.rebuildDomainShort", "Rebuild Domain")
+                : t("codeWiki.buildDomainShort", "Build Domain")}
           </Button>
         </div>
       </div>

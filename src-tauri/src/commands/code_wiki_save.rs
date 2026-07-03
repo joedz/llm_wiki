@@ -45,6 +45,54 @@ pub struct FingerprintsBaseline {
     pub files: Vec<FingerprintEntry>,
 }
 
+/// On-disk `meta.json` shape — one per repo, sibling of
+/// `knowledge-graph.json`. Mirrors UA's `meta.json` field set plus
+/// the LLM `review_narrative` and (Phase 5.5) `assemble_review`
+/// blocks. All fields are optional except `lastAnalyzedAt`,
+/// `version`, `kind`, and `gitCommitHash` so we stay forward-
+/// compatible when an older dashboard reads a newer meta.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineMeta {
+    pub last_analyzed_at: String,
+    pub git_commit_hash: String,
+    pub version: String,
+    /// `"codebase" | "knowledge" | "domain"` — discriminator so
+    /// the dashboard can route the file to the right view.
+    pub kind: String,
+    pub analyzed_files: u32,
+    /// Phase 8.5 LLM graph-reviewer verdict. Stored only when
+    /// the pipeline ran with `review_llm` and the call succeeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_narrative: Option<serde_json::Value>,
+    /// Convenience: extracted `approved` boolean so dashboards
+    /// don't have to peek inside `review_narrative`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_approved: Option<bool>,
+    /// Phase 5.5 LLM assemble-reviewer report (P0-4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assemble_review: Option<serde_json::Value>,
+    /// Fingerprint-based incremental counters (P0-5 Part B).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_file_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unchanged_file_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed_file_count: Option<u32>,
+}
+
+/// Write `meta.json` atomically. Caller owns the shape; this just
+/// pretty-prints and fsyncs.
+pub fn write_meta(path: &Path, meta: &PipelineMeta) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let bytes = serde_json::to_vec_pretty(meta).map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+    })?;
+    write_atomic(path, &bytes)
+}
+
 pub fn compute_fingerprint(file: &ScannedFile) -> FingerprintEntry {
     // Simple structural hash: combine the inputs that matter for
     // "did this file structurally change". Byte length and
@@ -335,6 +383,7 @@ mod tests {
                 kind: "contains".to_string(),
                 direction: "forward".to_string(),
                 weight: 1.0,
+                ..Default::default()
             })
             .collect();
 
