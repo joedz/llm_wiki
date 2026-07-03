@@ -824,6 +824,28 @@ pub fn build_graph_via_tree_sitter(
     nodes.sort_by(|a, b| a.id.cmp(&b.id));
     // Append non-code file edges
     edges.extend(non_code_edges);
+
+    // P1-A: deterministic non-code edges (tested_by / configures /
+    // depends_on). These read the scan + the set of valid node ids
+    // we just built and emit edges that target only existing
+    // file: nodes. The assembler (Phase 5) will dedupe / drop
+    // dangling like any other source, but our pre-filter means
+    // no edges are wasted in this pass.
+    let valid_node_ids: HashSet<String> = nodes.iter().map(|n| n.id.clone()).collect();
+    edges.extend(crate::commands::code_wiki_edge_rules::extract_tested_by(
+        scan,
+        &valid_node_ids,
+    ));
+    edges.extend(crate::commands::code_wiki_edge_rules::extract_configures(
+        scan,
+        &valid_node_ids,
+    ));
+    edges.extend(crate::commands::code_wiki_edge_rules::extract_non_code_depends_on(
+        scan,
+        project_root,
+        &valid_node_ids,
+    ));
+
     edges.sort_by(|a, b| a.source.cmp(&b.source).then(a.target.cmp(&b.target)));
 
     Ok(KnowledgeGraph {

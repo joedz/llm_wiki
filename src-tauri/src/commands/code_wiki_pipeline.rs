@@ -859,7 +859,13 @@ async fn run_pipeline_orchestrator(
 }
 
 /// Apply LLM-produced enrichments to the in-memory graph.
-/// Currently we only enrich file-level nodes by their `filePath`.
+/// Enrichments carry summary / tags / complexity for the file
+/// node matched by `path`, plus optional `reads_from` / `writes_to`
+/// arrays (P1-A) — each entry becomes a cross-file data-flow edge
+/// from this file's node to the target file's node. Edges whose
+/// target is missing from the graph are silently dropped here; the
+/// assembler (Phase 5) will dedupe / drop dangling for the
+/// deterministic edge sources.
 fn apply_enrichments(graph: &mut KnowledgeGraph, enrichments: &[FileEnrichment]) {
     for enr in enrichments {
         if let Some(node) = graph.nodes.iter_mut().find(|n| n.file_path == enr.path) {
@@ -868,6 +874,53 @@ fn apply_enrichments(graph: &mut KnowledgeGraph, enrichments: &[FileEnrichment])
             node.complexity = enr.complexity.clone();
         }
     }
+
+    // P1-A: emit reads_from / writes_to edges. We need the source
+    // file node id and the valid_node_ids set so we can avoid
+    // dangling targets. We collect new edges into a Vec so the
+    // borrow checker is happy (graph.nodes is borrowed mutably for
+    // the enrichments above, but here we only borrow immutably).
+    let valid_node_ids: std::collections::HashSet<String> =
+        graph.nodes.iter().map(|n| n.id.clone()).collect();
+    let existing_edges: std::collections::HashSet<(String, String, String)> = graph
+        .edges
+        .iter()
+        .map(|e| (e.source.clone(), e.target.clone(), e.kind.clone()))
+        .collect();
+    let mut new_edges: Vec<GraphEdge> = Vec::new();
+    for enr in enrichments {
+        let source_id = format!("file:{}", enr.path);
+        if !valid_node_ids.contains(&source_id) {
+            continue;
+        }
+        for tgt_rel in enr.reads_from.iter().chain(enr.writes_to.iter()) {
+            let target_id = format!("file:{tgt_rel}");
+            if !valid_node_ids.contains(&target_id) {
+                continue;
+            }
+            if source_id == target_id {
+                continue;
+            }
+            let kind = if enr.reads_from.iter().any(|r| r == tgt_rel) {
+                "reads_from"
+            } else {
+                "writes_to"
+            };
+            let key = (source_id.clone(), target_id.clone(), kind.to_string());
+            if existing_edges.contains(&key) {
+                continue;
+            }
+            new_edges.push(GraphEdge {
+                source: source_id.clone(),
+                target: target_id,
+                kind: kind.to_string(),
+                direction: "forward".to_string(),
+                weight: 0.5,
+                description: None,
+            });
+        }
+    }
+    graph.edges.extend(new_edges);
 }
 
 /// Run Phase 2 LLM enrichment for a list of batches. Up to
@@ -1275,12 +1328,16 @@ mod tests {
                 summary: "Tiny log lib.".to_string(),
                 tags: vec!["logging".to_string()],
                 complexity: "simple".to_string(),
+                reads_from: vec![],
+                writes_to: vec![],
             },
             FileEnrichment {
                 path: "src/main.rs".to_string(),
                 summary: "Demo entry point.".to_string(),
                 tags: vec!["demo".to_string(), "cli".to_string()],
                 complexity: "simple".to_string(),
+                reads_from: vec![],
+                writes_to: vec![],
             },
         ];
         apply_enrichments(&mut g, &enrichments);
@@ -1303,11 +1360,84 @@ mod tests {
             summary: "X".to_string(),
             tags: vec![],
             complexity: "simple".to_string(),
+            reads_from: vec![],
+            writes_to: vec![],
         }];
         apply_enrichments(&mut g, &enrichments);
         // Original node unchanged
         assert_eq!(g.nodes[0].summary, "");
         assert_eq!(g.nodes[0].complexity, "moderate");
+    }
+
+    #[test]
+    fn apply_enrichments_emits_reads_from_edge() {
+        let mut g = build_empty_graph();
+        g.nodes.push(make_node("src/lib.rs", "moderate"));
+        g.nodes.push(make_node("src/config.rs", "moderate"));
+        let enrichments = vec![FileEnrichment {
+            path: "src/lib.rs".to_string(),
+            summary: "X".to_string(),
+            tags: vec![],
+            complexity: "simple".to_string(),
+            reads_from: vec!["src/config.rs".to_string()],
+            writes_to: vec![],
+        }];
+        apply_enrichments(&mut g, &enrichments);
+        assert_eq!(g.edges.len(), 1);
+        assert_eq!(g.edges[0].source, "file:src/lib.rs");
+        assert_eq!(g.edges[0].target, "file:src/config.rs");
+        assert_eq!(g.edges[0].kind, "reads_from");
+    }
+
+    #[test]
+    fn apply_enrichments_emits_writes_to_edge() {
+        let mut g = build_empty_graph();
+        g.nodes.push(make_node("src/saver.rs", "moderate"));
+        g.nodes.push(make_node("src/cache.json", "moderate"));
+        let enrichments = vec![FileEnrichment {
+            path: "src/saver.rs".to_string(),
+            summary: "X".to_string(),
+            tags: vec![],
+            complexity: "simple".to_string(),
+            reads_from: vec![],
+            writes_to: vec!["src/cache.json".to_string()],
+        }];
+        apply_enrichments(&mut g, &enrichments);
+        assert_eq!(g.edges.len(), 1);
+        assert_eq!(g.edges[0].kind, "writes_to");
+    }
+
+    #[test]
+    fn apply_enrichments_drops_unknown_target_for_data_flow() {
+        let mut g = build_empty_graph();
+        g.nodes.push(make_node("src/lib.rs", "moderate"));
+        let enrichments = vec![FileEnrichment {
+            path: "src/lib.rs".to_string(),
+            summary: "X".to_string(),
+            tags: vec![],
+            complexity: "simple".to_string(),
+            reads_from: vec!["src/missing.rs".to_string()],
+            writes_to: vec!["src/also_missing.rs".to_string()],
+        }];
+        apply_enrichments(&mut g, &enrichments);
+        // Neither target exists — no edges
+        assert_eq!(g.edges.len(), 0);
+    }
+
+    #[test]
+    fn apply_enrichments_skips_self_data_flow() {
+        let mut g = build_empty_graph();
+        g.nodes.push(make_node("src/lib.rs", "moderate"));
+        let enrichments = vec![FileEnrichment {
+            path: "src/lib.rs".to_string(),
+            summary: "X".to_string(),
+            tags: vec![],
+            complexity: "simple".to_string(),
+            reads_from: vec!["src/lib.rs".to_string()],
+            writes_to: vec![],
+        }];
+        apply_enrichments(&mut g, &enrichments);
+        assert_eq!(g.edges.len(), 0);
     }
 
     // -- helpers for the apply_enrichments tests --
