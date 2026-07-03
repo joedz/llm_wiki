@@ -44,6 +44,11 @@ const PIPELINE_EVENT: &str = "codewiki-pipeline-progress";
 const DEFAULT_BATCH_SIZE: u32 = 15;
 const DEFAULT_LLM_CONCURRENCY: u32 = 5;
 const DEFAULT_LLM_BUDGET: u32 = 100;
+/// P1-B: When the fingerprint-based diff finds this ratio (or
+/// fewer) of files changed, Phase 2 LLM is skipped entirely and the
+/// pipeline reuses the unchanged nodes from the prior
+/// knowledge-graph.json. UA uses the same 10% heuristic.
+const INCREMENTAL_LLM_SKIP_THRESHOLD: f32 = 0.1;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PipelineConfig {
@@ -355,6 +360,13 @@ pub async fn code_wiki_run_pipeline(
     llm: Option<LlmRequestSpec>,
     review_llm: Option<LlmRequestSpec>,
     assemble_review_llm: Option<LlmRequestSpec>,
+    // P1-B: When true (default), the pipeline compares current scan
+    // fingerprints against the prior baseline. If fewer than
+    // INCREMENTAL_LLM_SKIP_THRESHOLD files changed AND an LLM was
+    // requested, Phase 2 LLM is skipped and the prior graph's
+    // unchanged nodes are spliced in. Pass false to force a full
+    // rebuild (fresh repos, major restructure).
+    incremental: Option<bool>,
     app: AppHandle,
     state: tauri::State<'_, Arc<PipelineRegistry>>,
 ) -> Result<(), String> {
@@ -369,6 +381,7 @@ pub async fn code_wiki_run_pipeline(
             llm,
             review_llm,
             assemble_review_llm,
+            incremental.unwrap_or(true),
         )
         .await;
         if let Err(e) = result {
@@ -396,6 +409,7 @@ pub async fn run_pipeline(
     llm: Option<LlmRequestSpec>,
     review_llm: Option<LlmRequestSpec>,
     assemble_review_llm: Option<LlmRequestSpec>,
+    incremental: bool,
 ) -> Result<PipelineSummary, String> {
     // Use project_path as the stable pipelineId — it must match what the
     // frontend store sets in begin() so all events (phase/batch/done) are
@@ -417,6 +431,7 @@ pub async fn run_pipeline(
         llm,
         review_llm,
         assemble_review_llm,
+        incremental,
         &cancel,
         Instant::now(),
     )
@@ -436,6 +451,7 @@ async fn run_pipeline_orchestrator(
     llm: Option<LlmRequestSpec>,
     review_llm: Option<LlmRequestSpec>,
     assemble_review_llm: Option<LlmRequestSpec>,
+    incremental: bool,
     cancel: &AtomicBool,
     started: Instant,
 ) -> Result<PipelineSummary, String> {
@@ -532,11 +548,49 @@ async fn run_pipeline_orchestrator(
     }
     emit_phase(app, pipeline_id, 3, "Batch", "done");
 
+    // --- P1-B: incremental diff (moved up from Phase 9 so we can
+    // decide whether to skip Phase 2 LLM before paying its cost) ---
+    //
+    // We load the prior fingerprints.json (if any) and compare it
+    // against the current scan. The result is a snapshot of
+    // changed / unchanged / removed paths plus the decision of
+    // whether Phase 2 LLM should be skipped (low change ratio +
+    // LLM requested + fingerprints baseline exists + incremental
+    // requested).
+    let baseline = std::fs::read_to_string(&understand_dir.join(FINGERPRINTS_FILE))
+        .ok()
+        .and_then(|raw| {
+            serde_json::from_str::<crate::commands::code_wiki_save::FingerprintsBaseline>(&raw).ok()
+        });
+    let (changed_paths, unchanged_paths, removed_paths) =
+        crate::commands::code_wiki_scanner::compute_changed_files(&scan, baseline.as_ref());
+    let total_code_files = scan
+        .files
+        .iter()
+        .filter(|f| f.file_category == "code")
+        .count() as u32;
+
+    let mut phase2_skipped = false;
+    let mut phase2_skip_reason: Option<String> = None;
+    let skip_phase2_llm = incremental
+        && llm.is_some()
+        && baseline.is_some()
+        && total_code_files > 0
+        && !changed_paths.is_empty()
+        && (changed_paths.len() as f32) / (total_code_files as f32)
+            < INCREMENTAL_LLM_SKIP_THRESHOLD;
+
     // --- Phase 2 ---
     if check_cancel(cancel) {
         return Ok(cancelled_summary(pipeline_id, project_path, repo_name, started, &warnings));
     }
-    let phase2_label = if llm.is_some() { "Analyze (LLM)" } else { "Analyze (no LLM)" };
+    let phase2_label = if skip_phase2_llm {
+        "Analyze (no LLM — incremental)"
+    } else if llm.is_some() {
+        "Analyze (LLM)"
+    } else {
+        "Analyze (no LLM)"
+    };
     emit_phase(app, pipeline_id, 4, phase2_label, "running");
 
     let mut graph = match build_graph_via_tree_sitter(
@@ -552,7 +606,49 @@ async fn run_pipeline_orchestrator(
         }
     };
 
-    if let Some(llm_spec) = llm {
+    if skip_phase2_llm {
+        // Reuse unchanged file-level nodes from the prior graph.
+        // The deterministic tree-sitter rebuild produced nodes
+        // for *all* files in `scan` (we don't have an incremental
+        // build path yet), so we remove the unchanged ones and
+        // splice in the prior versions instead. This preserves
+        // LLM-written summary / tags / complexity for unchanged
+        // files without re-running Phase 2.
+        let reason = format!(
+            "{} changed / {} total code files = {:.1}% < {:.0}% threshold; reusing prior graph nodes",
+            changed_paths.len(),
+            total_code_files,
+            (changed_paths.len() as f32) / (total_code_files.max(1) as f32) * 100.0,
+            INCREMENTAL_LLM_SKIP_THRESHOLD * 100.0
+        );
+        phase2_skipped = true;
+        phase2_skip_reason = Some(reason.clone());
+        warnings.push(format!("Phase 2 LLM skipped: {reason}"));
+        emit_warning(app, pipeline_id, 4, &reason);
+
+        match splice_unchanged_nodes(
+            &repo_dir,
+            &mut graph,
+            &changed_paths,
+            &removed_paths,
+        ) {
+            Ok(spliced) => {
+                if spliced > 0 {
+                    let msg = format!(
+                        "Spliced {} unchanged file nodes from prior knowledge-graph.json",
+                        spliced
+                    );
+                    warnings.push(msg.clone());
+                    emit_warning(app, pipeline_id, 4, &msg);
+                }
+            }
+            Err(e) => {
+                let msg = format!("prior graph splice failed: {e}");
+                warnings.push(msg.clone());
+                emit_warning(app, pipeline_id, 4, &msg);
+            }
+        }
+    } else if let Some(llm_spec) = llm {
         if plan.batches.len() as u32 > DEFAULT_LLM_BUDGET {
             let msg = format!(
                 "Batch count {} exceeds LLM budget cap {}; truncating to first {}",
@@ -748,36 +844,22 @@ async fn run_pipeline_orchestrator(
         return Ok(cancelled_summary(pipeline_id, project_path, repo_name, started, &warnings));
     }
     emit_phase(app, pipeline_id, 9, "Save", "running");
-    // Incremental diff: if a prior fingerprints.json exists,
-    // compare its hash set against the current scan and persist
-    // the counts so the dashboard can show "X files changed
-    // since last build". UA's `merge-batch-graphs.py` reads
-    // `--changed-files` for the same purpose; we surface the
-    // counts in meta.json so callers don't have to inspect the
-    // .understand/ directory directly.
-    let (changed_count, unchanged_count, removed_count) = {
-        let baseline_path = understand_dir.join(FINGERPRINTS_FILE);
-        let baseline = std::fs::read_to_string(&baseline_path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<crate::commands::code_wiki_save::FingerprintsBaseline>(&raw).ok());
-        let (changed, unchanged, removed) =
-            crate::commands::code_wiki_scanner::compute_changed_files(&scan, baseline.as_ref());
-        if !changed.is_empty() || !removed.is_empty() {
-            let msg = format!(
-                "Incremental diff: {} changed, {} unchanged, {} removed since last build",
-                changed.len(),
-                unchanged.len(),
-                removed.len()
-            );
-            warnings.push(msg.clone());
-            emit_warning(app, pipeline_id, 9, &msg);
-        }
-        (
-            changed.len() as u32,
-            unchanged.len() as u32,
-            removed.len() as u32,
-        )
-    };
+    // P1-B: the diff was already computed at the top of Phase 2;
+    // here we just persist the counts to meta.json so the dashboard
+    // can show "X files changed since last build".
+    let changed_count = changed_paths.len() as u32;
+    let unchanged_count = unchanged_paths.len() as u32;
+    let removed_count = removed_paths.len() as u32;
+    if !changed_paths.is_empty() || !removed_paths.is_empty() {
+        let msg = format!(
+            "Incremental diff: {} changed, {} unchanged, {} removed since last build",
+            changed_count,
+            unchanged_count,
+            removed_count
+        );
+        warnings.push(msg.clone());
+        emit_warning(app, pipeline_id, 9, &msg);
+    }
     let fp_path = match write_fingerprints(
         &project_root,
         &understand_dir,
@@ -811,6 +893,8 @@ async fn run_pipeline_orchestrator(
         changed_file_count: Some(changed_count),
         unchanged_file_count: Some(unchanged_count),
         removed_file_count: Some(removed_count),
+        phase2_skipped_due_to_incremental: if phase2_skipped { Some(true) } else { None },
+        phase2_skip_reason,
     };
     let meta_path = repo_dir.join(META_FILE);
     if let Err(e) = crate::commands::code_wiki_save::write_meta(&meta_path, &meta) {
@@ -921,6 +1005,62 @@ fn apply_enrichments(graph: &mut KnowledgeGraph, enrichments: &[FileEnrichment])
         }
     }
     graph.edges.extend(new_edges);
+}
+
+/// P1-B: Splice file-level nodes for unchanged paths back into the
+/// graph from the prior `knowledge-graph.json`. We replace the
+/// freshly-built nodes for unchanged files (which lack LLM-written
+/// summary / tags / complexity) with their prior versions. The
+/// assembler will dedupe / drop dangling as usual.
+///
+/// Returns the count of nodes actually replaced.
+fn splice_unchanged_nodes(
+    repo_dir: &std::path::Path,
+    graph: &mut KnowledgeGraph,
+    changed_paths: &[String],
+    _removed_paths: &[String],
+) -> Result<u32, String> {
+    let graph_path = repo_dir.join(GRAPH_FILE);
+    let raw = match std::fs::read_to_string(&graph_path) {
+        Ok(s) => s,
+        Err(_) => {
+            // No prior graph → nothing to splice (caller's warning
+            // already covers this case in practice; we still want
+            // the function to be infallible in spirit).
+            return Ok(0);
+        }
+    };
+    let prior: KnowledgeGraph = match serde_json::from_str(&raw) {
+        Ok(g) => g,
+        Err(e) => return Err(format!("parse prior graph: {e}")),
+    };
+
+    let changed_set: std::collections::HashSet<&str> =
+        changed_paths.iter().map(|s| s.as_str()).collect();
+
+    let mut spliced: u32 = 0;
+    for prior_node in prior
+        .nodes
+        .iter()
+        .filter(|n| n.kind == "file" && !changed_set.contains(n.file_path.as_str()))
+    {
+        // Replace the matching freshly-built node (if any) with the
+        // prior version. If no fresh node exists for this path,
+        // append the prior version directly.
+        let target_id = format!("file:{}", prior_node.file_path);
+        if let Some(fresh) = graph
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == target_id && n.kind == "file")
+        {
+            *fresh = prior_node.clone();
+        } else {
+            graph.nodes.push(prior_node.clone());
+        }
+        spliced += 1;
+    }
+
+    Ok(spliced)
 }
 
 /// Run Phase 2 LLM enrichment for a list of batches. Up to
@@ -1438,6 +1578,126 @@ mod tests {
         }];
         apply_enrichments(&mut g, &enrichments);
         assert_eq!(g.edges.len(), 0);
+    }
+
+    // -- P1-B: incremental splice tests --
+
+    fn make_graph_with_files(paths: &[&str]) -> KnowledgeGraph {
+        let mut g = build_empty_graph();
+        for p in paths {
+            g.nodes.push(make_node(p, "moderate"));
+        }
+        g
+    }
+
+    #[test]
+    fn splice_unchanged_nodes_replaces_prior_versions() {
+        // Set up: prior graph on disk with summary "prior" for src/lib.rs;
+        // current graph has the same file but no summary yet. Splice
+        // should pull the prior node into the current graph (by id).
+        let dir = tempdir_for_pipeline();
+        let repo_dir = dir.clone();
+        let mut prior_graph = make_graph_with_files(&["src/lib.rs", "src/utils.rs"]);
+        // Give the prior lib.rs a summary so we can verify the splice
+        // actually copied it.
+        if let Some(n) = prior_graph.nodes.iter_mut().find(|n| n.file_path == "src/lib.rs") {
+            n.summary = "prior summary".to_string();
+        }
+        std::fs::write(
+            &repo_dir.join("knowledge-graph.json"),
+            serde_json::to_vec_pretty(&prior_graph).unwrap(),
+        )
+        .unwrap();
+
+        // Current graph: includes src/lib.rs but with empty summary
+        let mut current = make_graph_with_files(&["src/lib.rs", "src/changed.rs"]);
+        let spliced =
+            splice_unchanged_nodes(&repo_dir, &mut current, &["src/changed.rs".to_string()], &[])
+                .unwrap();
+        // Two prior nodes (lib.rs, utils.rs) are not in changed_set:
+        //   - lib.rs: replaced in place
+        //   - utils.rs: appended (was missing from current scan)
+        assert_eq!(spliced, 2, "one replaced + one appended");
+        // The unchanged src/lib.rs node should now carry the prior summary
+        let lib = current
+            .nodes
+            .iter()
+            .find(|n| n.file_path == "src/lib.rs")
+            .unwrap();
+        assert_eq!(lib.summary, "prior summary");
+        // src/utils.rs was missing from the current scan but is appended by splice
+        assert!(current.nodes.iter().any(|n| n.file_path == "src/utils.rs"));
+    }
+
+    #[test]
+    fn splice_unchanged_nodes_skips_changed_paths() {
+        // Changed paths are explicitly excluded from splicing.
+        let dir = tempdir_for_pipeline();
+        let repo_dir = dir.clone();
+        let prior_graph = make_graph_with_files(&["src/lib.rs", "src/utils.rs"]);
+        std::fs::write(
+            &repo_dir.join("knowledge-graph.json"),
+            serde_json::to_vec_pretty(&prior_graph).unwrap(),
+        )
+        .unwrap();
+
+        let mut current = make_graph_with_files(&["src/lib.rs", "src/utils.rs"]);
+        // Mark BOTH as changed — splice should not pull anything
+        let spliced = splice_unchanged_nodes(
+            &repo_dir,
+            &mut current,
+            &["src/lib.rs".to_string(), "src/utils.rs".to_string()],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(spliced, 0);
+    }
+
+    #[test]
+    fn splice_unchanged_nodes_handles_missing_prior_graph() {
+        let dir = tempdir_for_pipeline();
+        let mut current = make_graph_with_files(&["src/lib.rs"]);
+        let spliced =
+            splice_unchanged_nodes(&dir, &mut current, &[], &[]).unwrap();
+        assert_eq!(spliced, 0);
+    }
+
+    #[test]
+    fn splice_unchanged_nodes_appends_when_no_fresh_node() {
+        // Prior graph has a node that's not in the current scan
+        // (e.g. it was filtered out). Splicing shouldn't add it
+        // unless it would have been in the unchanged set.
+        let dir = tempdir_for_pipeline();
+        let repo_dir = dir.clone();
+        let prior_graph = make_graph_with_files(&["src/removed.rs"]);
+        std::fs::write(
+            &repo_dir.join("knowledge-graph.json"),
+            serde_json::to_vec_pretty(&prior_graph).unwrap(),
+        )
+        .unwrap();
+
+        // Current graph doesn't include src/removed.rs at all.
+        // Splicing with changed=[] (so removed.rs is in unchanged
+        // set) should append it.
+        let mut current = make_graph_with_files(&["src/lib.rs"]);
+        let spliced =
+            splice_unchanged_nodes(&repo_dir, &mut current, &[], &[]).unwrap();
+        assert_eq!(spliced, 1);
+        assert!(current.nodes.iter().any(|n| n.file_path == "src/removed.rs"));
+    }
+
+    fn tempdir_for_pipeline() -> std::path::PathBuf {
+        let unique = format!(
+            "codewiki_pipeline_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let path = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&path).unwrap();
+        path
     }
 
     // -- helpers for the apply_enrichments tests --

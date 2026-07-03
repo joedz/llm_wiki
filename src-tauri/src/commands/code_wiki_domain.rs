@@ -1001,6 +1001,8 @@ pub async fn run_domain(
         changed_file_count: None,
         unchanged_file_count: None,
         removed_file_count: None,
+        phase2_skipped_due_to_incremental: None,
+        phase2_skip_reason: None,
     };
     write_meta(&meta_path, &meta).map_err(|e| format!("write meta: {e}"))?;
 

@@ -79,6 +79,16 @@ pub struct PipelineMeta {
     pub unchanged_file_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub removed_file_count: Option<u32>,
+    /// P1-B: True when Phase 2 LLM was skipped because the
+    /// incremental change ratio was below the configured threshold.
+    /// Useful for the dashboard to surface "incremental rebuild"
+    /// vs. "full rebuild" badges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase2_skipped_due_to_incremental: Option<bool>,
+    /// P1-B: Human-readable explanation of why Phase 2 was skipped
+    /// (or `None` if Phase 2 ran normally).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase2_skip_reason: Option<String>,
 }
 
 /// Write `meta.json` atomically. Caller owns the shape; this just
