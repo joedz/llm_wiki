@@ -54,6 +54,7 @@ const TOTAL_PHASES: u32 = 4;
 // ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DomainMeta {
     #[serde(default)]
     pub entities: Vec<String>,
@@ -84,9 +85,13 @@ pub struct DomainGraph {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DomainNode {
+    /// P1-C: flatten GraphNode into the parent so the on-disk shape
+    /// has `id`/`type`/`filePath`/etc. at the top level (matching UA's
+    /// `GraphNode`), with `domainMeta` as a sibling field instead of
+    /// being nested under `base`.
     #[serde(flatten)]
     pub base: GraphNode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, rename = "domainMeta", skip_serializing_if = "Option::is_none")]
     pub domain_meta: Option<DomainMeta>,
 }
 
@@ -1101,6 +1106,82 @@ mod tests {
             },
             domain_meta: None,
         }
+    }
+
+    // -- P1-C: camelCase serialization tests --
+
+    #[test]
+    fn domain_meta_serializes_camel_case() {
+        let meta = DomainMeta {
+            entities: vec!["User".to_string()],
+            business_rules: vec!["Must verify email".to_string()],
+            cross_domain_interactions: vec!["Auth → Profile".to_string()],
+            entry_point: Some("/api/login".to_string()),
+            entry_type: Some("http".to_string()),
+        };
+        let json = serde_json::to_value(&meta).unwrap();
+        let obj = json.as_object().unwrap();
+        // snake_case keys should NOT appear
+        assert!(!obj.contains_key("business_rules"));
+        assert!(!obj.contains_key("cross_domain_interactions"));
+        assert!(!obj.contains_key("entry_point"));
+        assert!(!obj.contains_key("entry_type"));
+        // camelCase keys SHOULD appear
+        assert!(obj.contains_key("businessRules"));
+        assert!(obj.contains_key("crossDomainInteractions"));
+        assert!(obj.contains_key("entryPoint"));
+        assert!(obj.contains_key("entryType"));
+        assert_eq!(obj["entryPoint"], "/api/login");
+        assert_eq!(obj["entryType"], "http");
+    }
+
+    #[test]
+    fn domain_node_serializes_with_domain_meta_top_level() {
+        // After flatten, the node's id / type / filePath should be
+        // top-level (matches UA's `GraphNode` shape) AND
+        // `domainMeta` should be a sibling field.
+        let node = DomainNode {
+            base: GraphNode {
+                id: "domain:auth".to_string(),
+                kind: "domain".to_string(),
+                name: "Auth".to_string(),
+                file_path: "src/auth".to_string(),
+                summary: "Auth domain".to_string(),
+                tags: vec!["auth".to_string()],
+                complexity: "complex".to_string(),
+                location: None,
+                language_notes: None,
+            },
+            domain_meta: Some(DomainMeta {
+                entities: vec!["User".to_string()],
+                business_rules: vec![],
+                cross_domain_interactions: vec![],
+                entry_point: None,
+                entry_type: None,
+            }),
+        };
+        let json = serde_json::to_value(&node).unwrap();
+        let obj = json.as_object().unwrap();
+        // Top-level fields from flatten (camelCase via GraphNode's
+        // existing renames):
+        assert_eq!(obj["id"], "domain:auth");
+        assert_eq!(obj["type"], "domain");
+        assert_eq!(obj["filePath"], "src/auth");
+        assert_eq!(obj["name"], "Auth");
+        // `base` wrapper should NOT appear
+        assert!(!obj.contains_key("base"));
+        // `domainMeta` should be a sibling
+        assert!(obj.contains_key("domainMeta"));
+        assert!(!obj.contains_key("domain_meta"));
+    }
+
+    #[test]
+    fn domain_node_omits_domain_meta_when_none() {
+        let node = empty_node("flow:auth-login", "flow");
+        let json = serde_json::to_string(&node).unwrap();
+        // When domain_meta is None, the field is skipped entirely.
+        assert!(!json.contains("domainMeta"));
+        assert!(!json.contains("domain_meta"));
     }
 
     fn edge(source: &str, target: &str, kind: &str, weight: f32) -> GraphEdge {

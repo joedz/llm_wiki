@@ -84,6 +84,76 @@ export interface LlmRequestSpec {
   temperature?: number
 }
 
+// ---------------------------------------------------------------------------
+// P1-C: DomainGraph types (camelCase, matches Rust serde output)
+// ---------------------------------------------------------------------------
+
+/**
+ * `domainMeta` is camelCase to match the Rust `DomainMeta` struct's
+ * `#[serde(rename_all = "camelCase")]` annotation. The shape mirrors
+ * UA's `domainMeta` exactly so a downstream consumer reading this
+ * JSON sees the same fields.
+ */
+export interface DomainMeta {
+  entities?: string[]
+  businessRules?: string[]
+  crossDomainInteractions?: string[]
+  entryPoint?: string
+  entryType?: "http" | "cli" | "event" | "cron" | "manual"
+}
+
+/**
+ * A domain-graph node. `type` discriminates between the three layers:
+ * `domain` (top-level), `flow` (within a domain), `step` (within a flow).
+ * `filePath` is optional — domain/flow nodes typically point at a
+ * directory or concept, not a single source file.
+ *
+ * All GraphNode fields are flattened into the top level (no `base`
+ * wrapper) — this matches UA's on-disk shape.
+ */
+export interface DomainGraphNode {
+  id: string
+  type: "domain" | "flow" | "step" | string
+  name: string
+  filePath?: string
+  summary: string
+  tags?: string[]
+  complexity?: "simple" | "moderate" | "complex"
+  location?: { startLine: number; endLine: number }
+  domainMeta?: DomainMeta
+}
+
+export interface DomainGraphEdge {
+  source: string
+  target: string
+  type:
+    | "contains_flow"
+    | "flow_step"
+    | "cross_domain"
+    | string
+  direction?: "forward" | "backward" | "bidirectional"
+  weight: number
+  description?: string
+}
+
+export interface DomainGraph {
+  version: string
+  kind: "domain"
+  project: {
+    name: string
+    languages?: string[]
+    frameworks?: string[]
+    description?: string
+    analyzedAt?: string
+    gitCommitHash?: string
+  }
+  nodes: DomainGraphNode[]
+  edges: DomainGraphEdge[]
+  /** P0-1: whether the graph was derived from an existing
+   * knowledge-graph.json (`true`) or via the lightweight scanner. */
+  derivedFromGraph?: boolean
+}
+
 export function subscribeDomainProgress(
   handler: (event: DomainProgressEvent) => void,
 ): Promise<UnlistenFn> {

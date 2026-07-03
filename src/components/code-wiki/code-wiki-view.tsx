@@ -37,6 +37,7 @@ import { PersonaSelector } from "./persona-selector"
 import { ExplainModal } from "./explain-modal"
 import { ChatPanel } from "./chat-panel"
 import { OnboardModal } from "./onboard-modal"
+import { DomainView } from "./domain-view"
 import { useCodeWikiPersonaStore } from "@/stores/code-wiki-persona-store"
 import { normalizePath } from "@/lib/path-utils"
 import { useTranslation } from "react-i18next"
@@ -121,6 +122,7 @@ export function CodeWikiView() {
   const [explainRepo, setExplainRepo] = useState<string | null>(null)
   const [chatRepo, setChatRepo] = useState<string | null>(null)
   const [onboardRepo, setOnboardRepo] = useState<string | null>(null)
+  const [domainViewRepo, setDomainViewRepo] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     if (!project) return
@@ -482,6 +484,7 @@ export function CodeWikiView() {
                 onExplain={() => setExplainRepo(repo.name)}
                 onChat={() => setChatRepo(repo.name)}
                 onOnboard={() => setOnboardRepo(repo.name)}
+                onDomainView={() => setDomainViewRepo(repo.name)}
                 knowledgeBuilding={
                   (useKnowledgeStore.getState().byProject[project?.path ?? ""]?.repoName === repo.name) &&
                   useKnowledgeStore.getState().byProject[project?.path ?? ""]?.result === "running"
@@ -521,6 +524,14 @@ export function CodeWikiView() {
           onClose={() => setOnboardRepo(null)}
         />
       )}
+      {project && domainViewRepo && (
+        <DomainView
+          open={Boolean(domainViewRepo)}
+          projectPath={project.path}
+          repoName={domainViewRepo}
+          onClose={() => setDomainViewRepo(null)}
+        />
+      )}
     </div>
   )
 }
@@ -556,6 +567,7 @@ function RepoRow({
   onExplain,
   onChat,
   onOnboard,
+  onDomainView,
   knowledgeBuilding,
   domainBuilding,
   hasKnowledge,
@@ -579,6 +591,7 @@ function RepoRow({
   onExplain: () => void
   onChat: () => void
   onOnboard: () => void
+  onDomainView: () => void
   knowledgeBuilding: boolean
   domainBuilding: boolean
   hasKnowledge: boolean
@@ -753,6 +766,17 @@ function RepoRow({
           >
             <ScrollText className="mr-1 h-3.5 w-3.5" />
             {t("codeWiki.onboardShort", "Onboard")}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onDomainView}
+            disabled={!hasDomain}
+            title={t("codeWiki.domainViewTooltip", "Visualise the domain graph")}
+            data-testid="domain-view-button"
+          >
+            <Network className="mr-1 h-3.5 w-3.5" />
+            {t("codeWiki.domainViewShort", "Domain View")}
           </Button>
         </div>
       </div>
