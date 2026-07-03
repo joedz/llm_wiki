@@ -748,6 +748,36 @@ async fn run_pipeline_orchestrator(
         return Ok(cancelled_summary(pipeline_id, project_path, repo_name, started, &warnings));
     }
     emit_phase(app, pipeline_id, 9, "Save", "running");
+    // Incremental diff: if a prior fingerprints.json exists,
+    // compare its hash set against the current scan and persist
+    // the counts so the dashboard can show "X files changed
+    // since last build". UA's `merge-batch-graphs.py` reads
+    // `--changed-files` for the same purpose; we surface the
+    // counts in meta.json so callers don't have to inspect the
+    // .understand/ directory directly.
+    let (changed_count, unchanged_count, removed_count) = {
+        let baseline_path = understand_dir.join(FINGERPRINTS_FILE);
+        let baseline = std::fs::read_to_string(&baseline_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<crate::commands::code_wiki_save::FingerprintsBaseline>(&raw).ok());
+        let (changed, unchanged, removed) =
+            crate::commands::code_wiki_scanner::compute_changed_files(&scan, baseline.as_ref());
+        if !changed.is_empty() || !removed.is_empty() {
+            let msg = format!(
+                "Incremental diff: {} changed, {} unchanged, {} removed since last build",
+                changed.len(),
+                unchanged.len(),
+                removed.len()
+            );
+            warnings.push(msg.clone());
+            emit_warning(app, pipeline_id, 9, &msg);
+        }
+        (
+            changed.len() as u32,
+            unchanged.len() as u32,
+            removed.len() as u32,
+        )
+    };
     let fp_path = match write_fingerprints(
         &project_root,
         &understand_dir,
@@ -778,9 +808,9 @@ async fn run_pipeline_orchestrator(
             .as_ref()
             .and_then(|v| v.get("approved").and_then(|x| x.as_bool())),
         assemble_review: assemble_review_value.clone(),
-        changed_file_count: None,
-        unchanged_file_count: None,
-        removed_file_count: None,
+        changed_file_count: Some(changed_count),
+        unchanged_file_count: Some(unchanged_count),
+        removed_file_count: Some(removed_count),
     };
     let meta_path = repo_dir.join(META_FILE);
     if let Err(e) = crate::commands::code_wiki_save::write_meta(&meta_path, &meta) {

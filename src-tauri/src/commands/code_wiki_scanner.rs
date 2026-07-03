@@ -773,8 +773,139 @@ fn detect_git_head(project_root: &Path) -> String {
     }
 }
 
+/// Compute incremental diff between the current scan and the
+/// previously-stored fingerprint baseline. Returns
+/// `(changed, unchanged, removed)`. When no baseline is present,
+/// every scanned file counts as `changed` (forces a full re-run).
+pub fn compute_changed_files(
+    scan: &ScanResult,
+    baseline: Option<&crate::commands::code_wiki_save::FingerprintsBaseline>,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let baseline_files = match baseline {
+        Some(b) => &b.files,
+        None => {
+            return (
+                scan.files.iter().map(|f| f.path.clone()).collect(),
+                Vec::new(),
+                Vec::new(),
+            );
+        }
+    };
+    let baseline_paths: std::collections::HashSet<&str> = baseline_files
+        .iter()
+        .map(|f| f.path.as_str())
+        .collect();
+    let mut remaining: std::collections::HashSet<&str> = baseline_paths.clone();
+    let mut changed: Vec<String> = Vec::new();
+    let mut unchanged: Vec<String> = Vec::new();
+    for f in &scan.files {
+        let cur_hash = crate::commands::code_wiki_save::compute_fingerprint(f).structural_hash;
+        match baseline_files.iter().find(|b| b.path == f.path) {
+            Some(b) if b.structural_hash == cur_hash => unchanged.push(f.path.clone()),
+            _ => changed.push(f.path.clone()),
+        }
+        remaining.remove(f.path.as_str());
+    }
+    let removed: Vec<String> = remaining.into_iter().map(String::from).collect();
+    (changed, unchanged, removed)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::commands::code_wiki_save::{
+        compute_fingerprint, FingerprintEntry, FingerprintsBaseline,
+    };
+
+    fn scanned(path: &str, lines: u32, cat: &str) -> ScannedFile {
+        ScannedFile {
+            path: path.to_string(),
+            language: "rust".to_string(),
+            size_lines: lines,
+            file_category: cat.to_string(),
+        }
+    }
+
+    fn baseline_with(paths: &[(&str, u32, &str)]) -> FingerprintsBaseline {
+        let files: Vec<FingerprintEntry> = paths
+            .iter()
+            .map(|(p, l, c)| {
+                let sf = scanned(p, *l, c);
+                let mut e = compute_fingerprint(&sf);
+                e.size_bytes = 0;
+                e
+            })
+            .collect();
+        FingerprintsBaseline {
+            version: "1.0.0".to_string(),
+            project_root: String::new(),
+            git_commit_hash: String::new(),
+            generated_at: String::new(),
+            files,
+        }
+    }
+
+    fn scan_with(paths: &[&str]) -> ScanResult {
+        let files: Vec<ScannedFile> = paths.iter().map(|p| scanned(p, 10, "code")).collect();
+        ScanResult {
+            project_root: String::new(),
+            files,
+            total_files: paths.len() as u32,
+            filtered_by_ignore: 0,
+            estimated_complexity: "moderate".to_string(),
+            stats: ScanStats {
+                files_scanned: paths.len() as u32,
+                by_category: BTreeMap::new(),
+                by_language: BTreeMap::new(),
+            },
+            project_name: String::new(),
+            project_description: String::new(),
+            frameworks: Vec::new(),
+            git_commit_hash: String::new(),
+            import_map: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn no_baseline_treats_all_as_changed() {
+        let scan = scan_with(&["src/a.ts", "src/b.ts"]);
+        let (changed, unchanged, removed) = compute_changed_files(&scan, None);
+        assert_eq!(changed.len(), 2);
+        assert!(unchanged.is_empty());
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn unchanged_files_match_hash() {
+        let scan = scan_with(&["src/a.ts", "src/b.ts"]);
+        let baseline = baseline_with(&[("src/a.ts", 10, "code"), ("src/b.ts", 10, "code")]);
+        let (changed, unchanged, removed) = compute_changed_files(&scan, Some(&baseline));
+        assert!(changed.is_empty());
+        assert_eq!(unchanged.len(), 2);
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn changed_files_detect_size_drift() {
+        let scan = scan_with(&["src/a.ts", "src/b.ts"]);
+        let baseline = baseline_with(&[
+            ("src/a.ts", 10, "code"),
+            ("src/b.ts", 12, "code"), // different size → changed
+        ]);
+        let (changed, unchanged, removed) = compute_changed_files(&scan, Some(&baseline));
+        assert_eq!(changed, vec!["src/b.ts"]);
+        assert_eq!(unchanged, vec!["src/a.ts"]);
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn removed_files_detected() {
+        let scan = scan_with(&["src/a.ts"]);
+        let baseline =
+            baseline_with(&[("src/a.ts", 10, "code"), ("src/deleted.ts", 10, "code")]);
+        let (_, _, removed) = compute_changed_files(&scan, Some(&baseline));
+        assert_eq!(removed, vec!["src/deleted.ts"]);
+    }
     use super::*;
     use std::io::Write;
 

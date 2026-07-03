@@ -328,6 +328,26 @@ pub async fn code_wiki_list_domain_repos(project_path: String) -> Result<Vec<Str
     .map_err(|e| format!("join error: {e}"))?
 }
 
+/// Save an onboarding markdown to `docs/ONBOARDING.md` inside the
+/// source tree (UA's preferred location). The user can then
+/// commit it for the team. Returns the absolute path written.
+#[tauri::command]
+pub async fn code_wiki_save_onboarding(
+    project_path: String,
+    repo_name: String,
+    markdown: String,
+) -> Result<String, String> {
+    let docs = std::path::Path::new(&project_path)
+        .join("raw")
+        .join("code")
+        .join(&repo_name)
+        .join("docs");
+    std::fs::create_dir_all(&docs).map_err(|e| format!("mkdir docs: {e}"))?;
+    let path = docs.join("ONBOARDING.md");
+    std::fs::write(&path, &markdown).map_err(|e| format!("write ONBOARDING.md: {e}"))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct IndexInvocationPlan {
     pub repo_root: PathBuf,
