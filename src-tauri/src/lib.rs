@@ -261,6 +261,7 @@ pub fn run() {
             commands::code_wiki_pipeline::code_wiki_cancel_pipeline,
             commands::code_wiki_knowledge::code_wiki_run_knowledge_pipeline,
             commands::code_wiki_domain::code_wiki_run_domain_pipeline,
+            commands::code_wiki_explain::code_wiki_explain_node,
             commands::code_wiki_diff::code_wiki_refresh_diff_overlay,
             commands::code_wiki_diff::code_wiki_get_diff_overlay,
             commands::file_sync::start_project_file_watcher,

@@ -8,6 +8,7 @@ pub mod code_wiki_dashboard;
 pub mod code_wiki_batcher;
 pub mod code_wiki_diff;
 pub mod code_wiki_domain;
+pub mod code_wiki_explain;
 pub mod code_wiki_ignore;
 pub mod code_wiki_knowledge;
 pub mod code_wiki_pipeline;

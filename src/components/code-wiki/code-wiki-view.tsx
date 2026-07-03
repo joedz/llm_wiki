@@ -15,6 +15,7 @@ import {
   BookOpen,
   Network,
   Loader2,
+  HelpCircle,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useWikiStore } from "@/stores/wiki-store"
@@ -31,6 +32,7 @@ import {
 import { PipelineProgress } from "./pipeline-progress"
 import { KnowledgeProgress } from "./knowledge-progress"
 import { PersonaSelector } from "./persona-selector"
+import { ExplainModal } from "./explain-modal"
 import { useCodeWikiPersonaStore } from "@/stores/code-wiki-persona-store"
 import { normalizePath } from "@/lib/path-utils"
 import { useTranslation } from "react-i18next"
@@ -112,6 +114,7 @@ export function CodeWikiView() {
   const [buildStates, setBuildStates] = useState<Record<string, BuildState>>({})
   const [openStates, setOpenStates] = useState<Record<string, OpenState>>({})
   const [copiedRepo, setCopiedRepo] = useState<string | null>(null)
+  const [explainRepo, setExplainRepo] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     if (!project) return
@@ -468,6 +471,7 @@ export function CodeWikiView() {
                 onRefreshDiff={() => refreshDiff(repo.name)}
                 onBuildKnowledge={() => buildKnowledge(repo.name)}
                 onBuildDomain={() => buildDomain(repo.name)}
+                onExplain={() => setExplainRepo(repo.name)}
                 knowledgeBuilding={
                   (useKnowledgeStore.getState().byProject[project?.path ?? ""]?.repoName === repo.name) &&
                   useKnowledgeStore.getState().byProject[project?.path ?? ""]?.result === "running"
@@ -483,6 +487,14 @@ export function CodeWikiView() {
           </ul>
         )}
       </div>
+      {project && explainRepo && (
+        <ExplainModal
+          open={Boolean(explainRepo)}
+          projectPath={project.path}
+          repoName={explainRepo}
+          onClose={() => setExplainRepo(null)}
+        />
+      )}
     </div>
   )
 }
@@ -515,6 +527,7 @@ function RepoRow({
   onRefreshDiff,
   onBuildKnowledge,
   onBuildDomain,
+  onExplain,
   knowledgeBuilding,
   domainBuilding,
   hasKnowledge,
@@ -535,6 +548,7 @@ function RepoRow({
   onRefreshDiff: () => void
   onBuildKnowledge: () => void
   onBuildDomain: () => void
+  onExplain: () => void
   knowledgeBuilding: boolean
   domainBuilding: boolean
   hasKnowledge: boolean
@@ -679,6 +693,16 @@ function RepoRow({
               : hasDomain
                 ? t("codeWiki.rebuildDomainShort", "Rebuild Domain")
                 : t("codeWiki.buildDomainShort", "Build Domain")}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onExplain}
+            disabled={!built}
+            title={t("codeWiki.explainTooltip", "Deep-dive explanation of a node")}
+          >
+            <HelpCircle className="mr-1 h-3.5 w-3.5" />
+            {t("codeWiki.explainShort", "Explain")}
           </Button>
         </div>
       </div>
