@@ -1,21 +1,25 @@
-// P1-C: Lightweight SVG domain view.
+// P3-C: Domain view via Sigma.js + ForceAtlas2.
 //
-// Renders the `domain-graph.json` produced by the domain pipeline.
+// Replaces the hand-rolled SVG renderer (which had no drag / zoom /
+// hover interactions) with a SigmaContainer + graphology graph
+// + forceAtlas2 layout. Reuses the existing @react-sigma/core and
+// graphology-layout-forceatlas2 dependencies (already in
+// package.json for the main `GraphView`).
+//
 // Two modes:
-//   - Overview (default): all `domain` nodes + cross-domain edges.
-//   - Detail (after click): the chosen domain's flows + their steps.
-//
-// Layout is intentionally simple — no `@xyflow/react` / ELK dependency
-// — because domain graphs are small (5-20 nodes typically). Flows
-// are placed in a horizontal row; their steps are placed below in a
-// second row, ordered by the `weight` field on `flow_step` edges.
+//   - Overview (default): all domain nodes + cross_domain edges
+//   - Detail (after click): the chosen domain's flows + their steps
 
 import { useEffect, useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { Loader2, Network, X, ArrowLeft } from "lucide-react"
+import Graph from "graphology"
+import forceAtlas2 from "graphology-layout-forceatlas2"
+import { SigmaContainer, useLoadGraph, useRegisterEvents } from "@react-sigma/core"
+import "@react-sigma/core/lib/style.css"
 import {
   getDomainGraph,
-  type DomainGraph,
+  type DomainGraph as DomainGraphT,
   type DomainGraphEdge,
   type DomainGraphNode,
 } from "@/lib/code-wiki/domain"
@@ -29,18 +33,23 @@ interface Props {
   onClose: () => void
 }
 
-const NODE_W = 220
-const NODE_H = 64
-const STEP_W = 180
-const STEP_H = 52
-const GAP_X = 32
-const GAP_Y = 56
+const NODE_COLOR: Record<string, string> = {
+  domain: "#a78bfa",  // violet-400
+  flow: "#60a5fa",    // blue-400
+  step: "#34d399",    // emerald-400
+}
+
+const NODE_SIZE: Record<string, number> = {
+  domain: 24,
+  flow: 16,
+  step: 10,
+}
 
 export function DomainView({ open, projectPath, repoName, onClose }: Props) {
   const { t } = useTranslation()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [graph, setGraph] = useState<DomainGraph | null>(null)
+  const [graph, setGraph] = useState<DomainGraphT | null>(null)
   const [activeDomainId, setActiveDomainId] = useState<string | null>(null)
 
   useEffect(() => {
@@ -59,7 +68,7 @@ export function DomainView({ open, projectPath, repoName, onClose }: Props) {
           setError("No domain graph found. Run /understand-domain first.")
           setGraph(null)
         } else {
-          setGraph(g as DomainGraph)
+          setGraph(g as DomainGraphT)
         }
       } catch (e) {
         setError(String(e))
@@ -69,13 +78,32 @@ export function DomainView({ open, projectPath, repoName, onClose }: Props) {
     })()
   }, [open, projectPath, repoName])
 
-  const view = useMemo(() => {
+  const builtGraph = useMemo(() => {
     if (!graph) return null
     if (activeDomainId) {
-      return buildDomainDetail(graph, activeDomainId)
+      return buildDomainDetailGraph(graph, activeDomainId)
     }
-    return buildDomainOverview(graph)
+    return buildDomainOverviewGraph(graph)
   }, [graph, activeDomainId])
+
+  // Apply ForceAtlas2 once per graph instance.
+  useEffect(() => {
+    if (!builtGraph) return
+    if (builtGraph.order === 0) return
+    try {
+      forceAtlas2.assign(builtGraph, {
+        iterations: 100,
+        settings: {
+          gravity: 1.2,
+          scalingRatio: 8,
+          slowDown: 5,
+          strongGravityMode: true,
+        },
+      })
+    } catch (e) {
+      console.warn("[domain-view] ForceAtlas2 failed:", e)
+    }
+  }, [builtGraph])
 
   if (!open) return null
 
@@ -86,7 +114,7 @@ export function DomainView({ open, projectPath, repoName, onClose }: Props) {
       aria-modal="true"
       data-testid="domain-view"
     >
-      <div className="flex max-h-[90vh] w-full max-w-5xl flex-col rounded-md border bg-card shadow-lg">
+      <div className="flex h-[90vh] w-full max-w-5xl flex-col rounded-md border bg-card shadow-lg">
         <header className="flex items-center justify-between border-b p-3">
           <h3 className="flex items-center gap-2 text-sm font-semibold">
             <Network className="h-4 w-4" />
@@ -112,33 +140,69 @@ export function DomainView({ open, projectPath, repoName, onClose }: Props) {
           </div>
         </header>
 
-        <div className="flex-1 overflow-auto p-4">
+        <div className="flex-1 overflow-hidden">
           {loading && (
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <div className="flex items-center gap-2 p-4 text-xs text-muted-foreground">
               <Loader2 className="h-3 w-3 animate-spin" />
               {t("codeWiki.domainView.loading", "Loading domain graph…")}
             </div>
           )}
-          {error && <div className="text-xs text-red-500">{error}</div>}
-          {view && <DomainSvg view={view} />}
-          {!view && !loading && !error && (
-            <p className="text-xs text-muted-foreground">
+          {error && (
+            <div className="p-4 text-xs text-red-500">{error}</div>
+          )}
+          {!loading && !error && !builtGraph && (
+            <p className="p-4 text-xs text-muted-foreground">
               {t(
                 "codeWiki.domainView.empty",
                 "No domain graph available. Run the domain pipeline first.",
               )}
             </p>
           )}
+          {!loading && !error && builtGraph && (
+            <SigmaContainer
+              style={{ width: "100%", height: "100%", background: "transparent" }}
+              settings={{
+                defaultNodeType: "circle",
+                defaultEdgeType: "line",
+                renderEdgeLabels: true,
+                labelSize: 12,
+                labelColor: { color: "#1f2937" },
+                edgeLabelSize: 10,
+                defaultEdgeColor: "#cbd5e1",
+                stagePadding: 30,
+                minCameraRatio: 0.3,
+                maxCameraRatio: 3,
+                enableEdgeClickEvents: false,
+              }}
+            >
+              <GraphLoader
+                graph={builtGraph}
+                activeDomainId={activeDomainId}
+                onNodeClick={(id) => {
+                  if (!activeDomainId) {
+                    // Clicking a domain in overview mode drills in
+                    const node = graph?.nodes.find((n) => n.id === id)
+                    if (node && node.type === "domain") {
+                      setActiveDomainId(id)
+                    }
+                  }
+                }}
+              />
+            </SigmaContainer>
+          )}
         </div>
 
-        {graph && (
+        {builtGraph && (
           <footer className="flex items-center justify-between border-t p-2 text-xs text-muted-foreground">
             <span>
-              {graph.nodes.length} nodes · {graph.edges.length} edges
+              {builtGraph.order} nodes · {builtGraph.size} edges
             </span>
-            <span>
-              {t("codeWiki.domainView.dashboardHint", "Open dashboard for full view")}
-            </span>
+            {activeDomainId && (
+              <span>
+                {t("codeWiki.domainView.activeDomain", "Viewing domain")}:{" "}
+                <code>{activeDomainId}</code>
+              </span>
+            )}
           </footer>
         )}
       </div>
@@ -147,396 +211,146 @@ export function DomainView({ open, projectPath, repoName, onClose }: Props) {
 }
 
 // ---------------------------------------------------------------------------
-// Layout
+// Graph builders (graphology.Graph instances)
 // ---------------------------------------------------------------------------
 
-interface BuiltView {
-  width: number
-  height: number
-  domainRects: Array<{
-    node: DomainGraphNode
-    x: number
-    y: number
-    flowCount: number
-  }>
-  crossDomainEdges: Array<{
-    edge: DomainGraphEdge
-    fromX: number
-    fromY: number
-    toX: number
-    toY: number
-  }>
-  flowRects: Array<{
-    node: DomainGraphNode
-    x: number
-    y: number
-    stepCount: number
-  }>
-  stepRects: Array<{
-    node: DomainGraphNode
-    x: number
-    y: number
-    order: number
-  }>
-  flowStepEdges: Array<{
-    edge: DomainGraphEdge
-    fromX: number
-    fromY: number
-    toX: number
-    toY: number
-    weight: number
-  }>
-  mode: "overview" | "detail"
+function buildDomainOverviewGraph(domainGraph: DomainGraphT): Graph {
+  const g = new Graph({ multi: true, type: "directed" });
+  for (const node of domainGraph.nodes) {
+    if (node.type !== "domain") continue;
+    g.addNode(node.id, {
+      label: node.name,
+      color: NODE_COLOR.domain ?? "#a78bfa",
+      size: NODE_SIZE.domain ?? 20,
+      x: pseudoRandomX(node.id),
+      y: pseudoRandomY(node.id),
+      nodeType: "domain",
+    });
+  }
+  for (const edge of domainGraph.edges) {
+    if (edge.type !== "cross_domain") continue;
+    if (!g.hasNode(edge.source) || !g.hasNode(edge.target)) continue;
+    g.addEdgeWithKey(`${edge.source}->${edge.target}`, edge.source, edge.target, {
+      label: edge.description ?? "",
+      color: "#f59e0b",
+      size: 2,
+    });
+  }
+  return g;
 }
 
-function buildDomainOverview(graph: DomainGraph): BuiltView {
-  const domainNodes = graph.nodes.filter((n) => n.type === "domain")
-  const flowCountMap = new Map<string, number>()
-  for (const e of graph.edges) {
-    if (e.type === "contains_flow") {
-      flowCountMap.set(e.source, (flowCountMap.get(e.source) ?? 0) + 1)
-    }
-  }
-
-  const padding = 24
-  const cols = Math.max(1, Math.ceil(Math.sqrt(domainNodes.length)))
-  const rows = Math.max(1, Math.ceil(domainNodes.length / cols))
-  const width = padding * 2 + cols * (NODE_W + GAP_X)
-  const height = padding * 2 + rows * (NODE_H + GAP_Y)
-
-  const domainRects = domainNodes.map((node, i) => {
-    const col = i % cols
-    const row = Math.floor(i / cols)
-    return {
-      node,
-      x: padding + col * (NODE_W + GAP_X),
-      y: padding + row * (NODE_H + GAP_Y),
-      flowCount: flowCountMap.get(node.id) ?? 0,
-    }
-  })
-
-  const rectIndex = new Map<string, { x: number; y: number }>()
-  for (const r of domainRects) rectIndex.set(r.node.id, r)
-
-  const crossDomainEdges: BuiltView["crossDomainEdges"] = []
-  for (const e of graph.edges) {
-    if (e.type !== "cross_domain") continue
-    const from = rectIndex.get(e.source)
-    const to = rectIndex.get(e.target)
-    if (!from || !to) continue
-    crossDomainEdges.push({
-      edge: e,
-      fromX: from.x + NODE_W / 2,
-      fromY: from.y + NODE_H / 2,
-      toX: to.x + NODE_W / 2,
-      toY: to.y + NODE_H / 2,
-    })
-  }
-
-  return {
-    width,
-    height,
-    domainRects,
-    crossDomainEdges,
-    flowRects: [],
-    stepRects: [],
-    flowStepEdges: [],
-    mode: "overview",
-  }
-}
-
-function buildDomainDetail(graph: DomainGraph, domainId: string): BuiltView {
-  // flows under this domain
+function buildDomainDetailGraph(
+  domainGraph: DomainGraphT,
+  domainId: string,
+): Graph {
+  const g = new Graph({ multi: false, type: "directed" });
+  // flows
   const flowIds = new Set(
-    graph.edges
+    domainGraph.edges
       .filter((e) => e.type === "contains_flow" && e.source === domainId)
       .map((e) => e.target),
-  )
-  const flowNodes = graph.nodes.filter((n) => flowIds.has(n.id))
-
-  // step edges from those flows
-  const stepEdges = graph.edges.filter(
+  );
+  const flowNodes = domainGraph.nodes.filter((n) => flowIds.has(n.id));
+  for (const node of flowNodes) {
+    g.addNode(node.id, {
+      label: node.name,
+      color: NODE_COLOR.flow ?? "#60a5fa",
+      size: NODE_SIZE.flow ?? 14,
+      x: pseudoRandomX(node.id),
+      y: pseudoRandomY(node.id),
+      nodeType: "flow",
+    });
+  }
+  // step edges
+  const stepEdges = domainGraph.edges.filter(
     (e) => e.type === "flow_step" && flowIds.has(e.source),
-  )
-  const stepIds = new Set(stepEdges.map((e) => e.target))
-  const stepNodes = graph.nodes.filter((n) => stepIds.has(n.id))
-
-  // ordering: step order = round(weight * 10)
-  const stepOrderMap = new Map<string, number>()
-  for (const e of stepEdges) {
-    stepOrderMap.set(e.target, Math.round((e.weight ?? 0) * 10))
+  );
+  const stepIds = new Set(stepEdges.map((e) => e.target));
+  const stepNodes = domainGraph.nodes.filter((n) => stepIds.has(n.id));
+  for (const node of stepNodes) {
+    g.addNode(node.id, {
+      label: node.name,
+      color: NODE_COLOR.step ?? "#34d399",
+      size: NODE_SIZE.step ?? 8,
+      x: pseudoRandomX(node.id),
+      y: pseudoRandomY(node.id),
+      nodeType: "step",
+    });
   }
-
-  // group steps by flow
-  const stepsByFlow = new Map<string, DomainGraphNode[]>()
-  for (const e of stepEdges) {
-    const arr = stepsByFlow.get(e.source) ?? []
-    const node = stepNodes.find((n) => n.id === e.target)
-    if (node) arr.push(node)
-    stepsByFlow.set(e.source, arr)
-  }
-  // sort each group's steps by weight asc
-  for (const [flowId, steps] of stepsByFlow) {
-    steps.sort((a, b) => {
-      const wa = stepEdges.find((e) => e.target === a.id)?.weight ?? 0
-      const wb = stepEdges.find((e) => e.target === b.id)?.weight ?? 0
-      return wa - wb
-    })
-    stepsByFlow.set(flowId, steps)
-  }
-
-  const padding = 24
-  // Flow row at y=padding; step row at y=padding + NODE_H + GAP_Y
-  const flowY = padding
-  const stepY = padding + NODE_H + GAP_Y * 2
-
-  const flowRects: BuiltView["flowRects"] = flowNodes.map((node, i) => ({
-    node,
-    x: padding + i * (NODE_W + GAP_X),
-    y: flowY,
-    stepCount: stepsByFlow.get(node.id)?.length ?? 0,
-  }))
-  const flowRectMap = new Map<string, { x: number; y: number }>()
-  for (const r of flowRects) flowRectMap.set(r.node.id, r)
-
-  const stepRects: BuiltView["stepRects"] = []
-  // Steps get their own row, ordered by their flow's column then by order
-  let stepCursor = padding
-  for (const flow of flowNodes) {
-    const steps = stepsByFlow.get(flow.id) ?? []
-    for (const s of steps) {
-      stepRects.push({
-        node: s,
-        x: stepCursor,
-        y: stepY,
-        order: stepOrderMap.get(s.id) ?? 0,
-      })
-      stepCursor += STEP_W + GAP_X
+  // contains_flow
+  for (const e of domainGraph.edges) {
+    if (e.type === "contains_flow" && e.source === domainId) {
+      if (g.hasNode(e.source) && g.hasNode(e.target)) {
+        g.addEdgeWithKey(`${e.source}->${e.target}`, e.source, e.target, {
+          color: "#94a3b8",
+        });
+      }
     }
   }
-  const stepRectMap = new Map<string, { x: number; y: number }>()
-  for (const r of stepRects) stepRectMap.set(r.node, r)
-
-  const flowStepEdges: BuiltView["flowStepEdges"] = []
+  // flow_step
   for (const e of stepEdges) {
-    const from = flowRectMap.get(e.source)
-    const to = stepRectMap.get(e.target)
-    if (!from || !to) continue
-    flowStepEdges.push({
-      edge: e,
-      fromX: from.x + NODE_W / 2,
-      fromY: from.y + NODE_H,
-      toX: to.x + STEP_W / 2,
-      toY: to.y,
-      weight: e.weight,
-    })
+    if (g.hasNode(e.source) && g.hasNode(e.target)) {
+      g.addEdgeWithKey(`${e.source}->${e.target}`, e.source, e.target, {
+        color: "#64748b",
+        size: 1,
+      });
+    }
   }
+  return g;
+}
 
-  const width = Math.max(
-    padding * 2 + flowNodes.length * (NODE_W + GAP_X),
-    padding * 2 + stepCursor - GAP_X,
-  )
-  const height = padding * 2 + NODE_H + GAP_Y * 2 + STEP_H + GAP_Y
-
-  return {
-    width,
-    height,
-    domainRects: [],
-    crossDomainEdges: [],
-    flowRects,
-    stepRects,
-    flowStepEdges,
-    mode: "detail",
+// Deterministic-ish per-id pseudo positions so successive
+// re-renders don't churn the layout. ForceAtlas2 refines them.
+function pseudoRandomX(id: string): number {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) {
+    h = (h * 31 + id.charCodeAt(i)) | 0;
   }
+  return ((h & 0xffff) / 0xffff - 0.5) * 4;
+}
+
+function pseudoRandomY(id: string): number {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) {
+    h = (h * 37 + id.charCodeAt(i)) | 0;
+  }
+  return (((h >> 16) & 0xffff) / 0xffff - 0.5) * 4;
 }
 
 // ---------------------------------------------------------------------------
-// SVG renderer
+// Inner Sigma loader
 // ---------------------------------------------------------------------------
 
-function DomainSvg({ view }: { view: BuiltView }) {
-  if (view.mode === "overview") {
-    return (
-      <svg
-        width={view.width}
-        height={view.height}
-        viewBox={`0 0 ${view.width} ${view.height}`}
-        className="text-card-foreground"
-        data-testid="domain-overview-svg"
-      >
-        <defs>
-          <marker
-            id="cd-arrow"
-            viewBox="0 0 10 10"
-            refX="9"
-            refY="5"
-            markerWidth="6"
-            markerHeight="6"
-            orient="auto"
-          >
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--color-accent)" />
-          </marker>
-        </defs>
-        {view.crossDomainEdges.map((e, i) => (
-          <line
-            key={`cd-${i}`}
-            x1={e.fromX}
-            y1={e.fromY}
-            x2={e.toX}
-            y2={e.toY}
-            stroke="var(--color-accent)"
-            strokeWidth={2}
-            strokeDasharray="6 3"
-            markerEnd="url(#cd-arrow)"
-          >
-            <title>{e.edge.description ?? "cross-domain"}</title>
-          </line>
-        ))}
-        {view.domainRects.map((r) => (
-          <g
-            key={r.node.id}
-            data-testid={`domain-node-${r.node.id}`}
-            onClick={() => r.flowCount > 0 && undefined}
-          >
-            <rect
-              x={r.x}
-              y={r.y}
-              width={NODE_W}
-              height={NODE_H}
-              rx={8}
-              fill="var(--color-surface)"
-              stroke="var(--color-border-medium)"
-              strokeWidth={1}
-            />
-            <text
-              x={r.x + 12}
-              y={r.y + 22}
-              fontSize={13}
-              fontWeight={600}
-              fill="currentColor"
-            >
-              {r.node.name}
-            </text>
-            <text
-              x={r.x + 12}
-              y={r.y + 42}
-              fontSize={11}
-              fill="var(--color-text-muted)"
-            >
-              {r.flowCount} flow{r.flowCount === 1 ? "" : "s"}
-              {r.node.domainMeta?.entryType
-                ? ` · ${r.node.domainMeta.entryType}`
-                : ""}
-            </text>
-          </g>
-        ))}
-      </svg>
-    )
-  }
-
-  // detail: flows + steps
-  return (
-    <svg
-      width={view.width}
-      height={view.height}
-      viewBox={`0 0 ${view.width} ${view.height}`}
-      data-testid="domain-detail-svg"
-    >
-      <defs>
-        <marker
-          id="fs-arrow"
-          viewBox="0 0 10 10"
-          refX="9"
-          refY="5"
-          markerWidth="6"
-          markerHeight="6"
-          orient="auto"
-        >
-          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--color-border-medium)" />
-        </marker>
-      </defs>
-      {view.flowStepEdges.map((e, i) => (
-        <line
-          key={`fs-${i}`}
-          x1={e.fromX}
-          y1={e.fromY}
-          x2={e.toX}
-          y2={e.toY}
-          stroke="var(--color-border-medium)"
-          strokeWidth={1.5}
-          markerEnd="url(#fs-arrow)"
-        />
-      ))}
-      {view.flowRects.map((r) => (
-        <g key={r.node.id} data-testid={`flow-node-${r.node.id}`}>
-          <rect
-            x={r.x}
-            y={r.y}
-            width={NODE_W}
-            height={NODE_H}
-            rx={8}
-            fill="var(--color-elevated)"
-            stroke="var(--color-border-medium)"
-            strokeWidth={1}
-          />
-          <text
-            x={r.x + 12}
-            y={r.y + 22}
-            fontSize={13}
-            fontWeight={600}
-            fill="currentColor"
-          >
-            {r.node.name}
-          </text>
-          <text
-            x={r.x + 12}
-            y={r.y + 42}
-            fontSize={11}
-            fill="var(--color-text-muted)"
-          >
-            {r.stepCount} step{r.stepCount === 1 ? "" : "s"}
-            {r.node.domainMeta?.entryType
-              ? ` · ${r.node.domainMeta.entryType}`
-              : ""}
-          </text>
-        </g>
-      ))}
-      {view.stepRects.map((r) => (
-        <g key={r.node.id} data-testid={`step-node-${r.node.id}`}>
-          <rect
-            x={r.x}
-            y={r.y}
-            width={STEP_W}
-            height={STEP_H}
-            rx={6}
-            fill="var(--color-surface)"
-            stroke="var(--color-border-subtle)"
-            strokeWidth={1}
-          />
-          <text
-            x={r.x + 10}
-            y={r.y + 18}
-            fontSize={11}
-            fontWeight={500}
-            fill="currentColor"
-          >
-            {truncate(r.node.name, 26)}
-          </text>
-          <text
-            x={r.x + 10}
-            y={r.y + 36}
-            fontSize={10}
-            fill="var(--color-text-muted)"
-          >
-            step {r.order}
-          </text>
-        </g>
-      ))}
-    </svg>
-  )
+interface GraphLoaderProps {
+  graph: Graph
+  activeDomainId: string | null
+  onNodeClick?: (id: string) => void
 }
 
-function truncate(s: string, n: number): string {
-  if (s.length <= n) return s
-  return `${s.slice(0, n - 1)}…`
+function GraphLoader({ graph, activeDomainId, onNodeClick }: GraphLoaderProps) {
+  const loadGraph = useLoadGraph();
+  const registerEvents = useRegisterEvents();
+
+  useEffect(() => {
+    const g = loadGraph();
+    // Clear and reload
+    g.clear();
+    g.import(graph.export());
+    // Force a refresh
+    if (typeof (g as unknown as { refresh?: () => void }).refresh === "function") {
+      (g as unknown as { refresh: () => void }).refresh();
+    }
+  }, [graph, loadGraph]);
+
+  useEffect(() => {
+    if (!onNodeClick) return;
+    const unregister = registerEvents({
+      clickNode: (event) => {
+        onNodeClick(event.node);
+      },
+    });
+    return () => unregister();
+  }, [onNodeClick, registerEvents, activeDomainId]);
+
+  return null;
 }
