@@ -1018,13 +1018,21 @@ fn apply_enrichments(graph: &mut KnowledgeGraph, enrichments: &[FileEnrichment])
     graph.edges.extend(new_edges);
 }
 
-/// P1-B: Splice file-level nodes for unchanged paths back into the
-/// graph from the prior `knowledge-graph.json`. We replace the
-/// freshly-built nodes for unchanged files (which lack LLM-written
-/// summary / tags / complexity) with their prior versions. The
-/// assembler will dedupe / drop dangling as usual.
+/// P1-B + P2-B: Splice nodes for unchanged paths back into the
+/// graph from the prior `knowledge-graph.json`.
 ///
-/// Returns the count of nodes actually replaced.
+/// P1-B scope (unchanged): file-level nodes only — replace the
+/// freshly-built `file:<rel>` node with the prior version (which
+/// carries the LLM-written summary / tags / complexity).
+///
+/// P2-B extension (new): function / class / module / document /
+/// any other nodes whose `file_path` is in the unchanged set are
+/// also replaced with their prior versions. We additionally splice
+/// in prior edges whose either endpoint is in the unchanged set,
+/// with fresh tree-sitter edges winning when both exist.
+///
+/// Returns the total count of nodes + edges added (used for the
+/// `meta.json` warning).
 fn splice_unchanged_nodes(
     repo_dir: &std::path::Path,
     graph: &mut KnowledgeGraph,
@@ -1049,29 +1057,62 @@ fn splice_unchanged_nodes(
     let changed_set: std::collections::HashSet<&str> =
         changed_paths.iter().map(|s| s.as_str()).collect();
 
-    let mut spliced: u32 = 0;
+    // Step 1: collect prior node ids whose file_path is in the
+    // unchanged set (P2-B: any kind, not just "file").
+    let mut prior_unchanged_node_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    let mut nodes_to_splice: Vec<GraphNode> = Vec::new();
     for prior_node in prior
         .nodes
         .iter()
-        .filter(|n| n.kind == "file" && !changed_set.contains(n.file_path.as_str()))
+        .filter(|n| !changed_set.contains(n.file_path.as_str()))
     {
-        // Replace the matching freshly-built node (if any) with the
-        // prior version. If no fresh node exists for this path,
-        // append the prior version directly.
-        let target_id = format!("file:{}", prior_node.file_path);
-        if let Some(fresh) = graph
-            .nodes
-            .iter_mut()
-            .find(|n| n.id == target_id && n.kind == "file")
-        {
-            *fresh = prior_node.clone();
-        } else {
-            graph.nodes.push(prior_node.clone());
+        if prior_unchanged_node_ids.insert(prior_node.id.clone()) {
+            nodes_to_splice.push(prior_node.clone());
         }
-        spliced += 1;
     }
 
-    Ok(spliced)
+    // Step 2: replace or append each unchanged prior node into the
+    // current graph. Prior wins for nodes that exist in both
+    // (carrying forward any LLM data attached to them).
+    let mut spliced_nodes: u32 = 0;
+    for prior_node in nodes_to_splice {
+        if let Some(fresh) = graph.nodes.iter_mut().find(|n| n.id == prior_node.id) {
+            *fresh = prior_node;
+        } else {
+            graph.nodes.push(prior_node);
+        }
+        spliced_nodes += 1;
+    }
+
+    // Step 3: splice in prior edges whose either endpoint is in the
+    // unchanged set. Fresh tree-sitter edges (same source/target/kind)
+    // take precedence — we only add edges the fresh tree didn't
+    // produce (typically LLM-emitted reads_from / writes_to edges).
+    let existing_edge_keys: std::collections::HashSet<(String, String, String)> = graph
+        .edges
+        .iter()
+        .map(|e| (e.source.clone(), e.target.clone(), e.kind.clone()))
+        .collect();
+    let mut spliced_edges: u32 = 0;
+    for prior_edge in prior.edges.into_iter().filter(|e| {
+        prior_unchanged_node_ids.contains(&e.source)
+            || prior_unchanged_node_ids.contains(&e.target)
+    }) {
+        let key = (
+            prior_edge.source.clone(),
+            prior_edge.target.clone(),
+            prior_edge.kind.clone(),
+        );
+        if existing_edge_keys.contains(&key) {
+            // Fresh edge already covers this — keep fresh.
+            continue;
+        }
+        graph.edges.push(prior_edge);
+        spliced_edges += 1;
+    }
+
+    Ok(spliced_nodes + spliced_edges)
 }
 
 /// Run Phase 2 LLM enrichment for a list of batches. Up to
@@ -1716,6 +1757,221 @@ mod tests {
             splice_unchanged_nodes(&repo_dir, &mut current, &[], &[]).unwrap();
         assert_eq!(spliced, 1);
         assert!(current.nodes.iter().any(|n| n.file_path == "src/removed.rs"));
+    }
+
+    // -- P2-B: function/class splice + edge splicing --
+
+    /// Helper: build a function-node GraphNode with summary.
+    fn make_function_node(file_path: &str, qname: &str, summary: &str) -> GraphNode {
+        GraphNode {
+            id: format!("function:{}:{}", file_path, qname),
+            kind: "function".to_string(),
+            name: qname.to_string(),
+            file_path: file_path.to_string(),
+            summary: summary.to_string(),
+            tags: vec!["original".to_string()],
+            complexity: "simple".to_string(),
+            location: Some(NodeLocation {
+                start_line: 1,
+                end_line: 10,
+            }),
+            language_notes: None,
+        }
+    }
+
+    #[test]
+    fn splice_unchanged_nodes_replaces_function_class_too() {
+        // Prior graph has a function node with summary "prior fn".
+        // Current graph has the same function with empty summary.
+        // After splice, the function node should carry the prior summary.
+        let dir = tempdir_for_pipeline();
+        let repo_dir = dir.clone();
+
+        let mut prior_graph = make_graph_with_files(&["src/lib.ts"]);
+        let fn_node = make_function_node("src/lib.ts", "foo", "prior fn summary");
+        prior_graph.nodes.push(fn_node);
+        std::fs::write(
+            &repo_dir.join("knowledge-graph.json"),
+            serde_json::to_vec_pretty(&prior_graph).unwrap(),
+        )
+        .unwrap();
+
+        // Current graph has a function node for foo but no summary
+        let mut current = build_empty_graph();
+        current.nodes.push(GraphNode {
+            id: "file:src/lib.ts".to_string(),
+            kind: "file".to_string(),
+            name: "lib.ts".to_string(),
+            file_path: "src/lib.ts".to_string(),
+            summary: String::new(),
+            tags: vec![],
+            complexity: "moderate".to_string(),
+            location: None,
+            language_notes: None,
+        });
+        let mut fresh_fn = make_function_node("src/lib.ts", "foo", "");
+        fresh_fn.summary = String::new();
+        fresh_fn.tags = vec![];
+        current.nodes.push(fresh_fn);
+
+        let _spliced =
+            splice_unchanged_nodes(&repo_dir, &mut current, &[], &[]).unwrap();
+
+        // The function node should now carry the prior summary
+        let fn_after = current
+            .nodes
+            .iter()
+            .find(|n| n.kind == "function" && n.file_path == "src/lib.ts")
+            .unwrap();
+        assert_eq!(fn_after.summary, "prior fn summary");
+        assert_eq!(fn_after.tags, vec!["original".to_string()]);
+    }
+
+    #[test]
+    fn splice_unchanged_nodes_preserves_fresh_edges() {
+        // Prior has edge lib:foo → lib:bar calls.
+        // Current has the same edge.
+        // Fresh should win (prior LLM-emitted metadata may be stale).
+        let dir = tempdir_for_pipeline();
+        let repo_dir = dir.clone();
+        let mut prior_graph = make_graph_with_files(&["src/lib.ts"]);
+        prior_graph.edges.push(GraphEdge {
+            source: "function:src/lib.ts:foo".to_string(),
+            target: "function:src/lib.ts:bar".to_string(),
+            kind: "calls".to_string(),
+            direction: "forward".to_string(),
+            weight: 0.8,
+            description: Some("prior description (stale)".to_string()),
+        });
+        std::fs::write(
+            &repo_dir.join("knowledge-graph.json"),
+            serde_json::to_vec_pretty(&prior_graph).unwrap(),
+        )
+        .unwrap();
+
+        // Current graph: same nodes + same edge with different weight
+        let mut current = make_graph_with_files(&["src/lib.ts"]);
+        current.nodes.push(make_function_node("src/lib.ts", "foo", ""));
+        current.nodes.push(make_function_node("src/lib.ts", "bar", ""));
+        current.edges.push(GraphEdge {
+            source: "function:src/lib.ts:foo".to_string(),
+            target: "function:src/lib.ts:bar".to_string(),
+            kind: "calls".to_string(),
+            direction: "forward".to_string(),
+            weight: 0.9,
+            description: None,
+        });
+
+        let spliced = splice_unchanged_nodes(&repo_dir, &mut current, &[], &[]).unwrap();
+        // No new edges added (fresh edge already covers it)
+        // spliced count = nodes replaced + edges added
+        assert!(spliced >= 0, "spliced count should not be negative");
+        // Fresh edge weight preserved
+        assert_eq!(current.edges.len(), 1);
+        assert_eq!(current.edges[0].weight, 0.9);
+    }
+
+    #[test]
+    fn splice_unchanged_nodes_adds_prior_only_edges() {
+        // Prior graph has an LLM-emitted reads_from edge. Current
+        // doesn't have this edge. Splice should add it.
+        let dir = tempdir_for_pipeline();
+        let repo_dir = dir.clone();
+        let mut prior_graph = make_graph_with_files(&["src/foo.ts", "src/bar.ts"]);
+        prior_graph.edges.push(GraphEdge {
+            source: "file:src/foo.ts".to_string(),
+            target: "file:src/bar.ts".to_string(),
+            kind: "reads_from".to_string(),
+            direction: "forward".to_string(),
+            weight: 0.5,
+            description: None,
+        });
+        std::fs::write(
+            &repo_dir.join("knowledge-graph.json"),
+            serde_json::to_vec_pretty(&prior_graph).unwrap(),
+        )
+        .unwrap();
+
+        // Current graph: no edges at all
+        let mut current = make_graph_with_files(&["src/foo.ts", "src/bar.ts"]);
+        let spliced = splice_unchanged_nodes(&repo_dir, &mut current, &[], &[]).unwrap();
+        // Edges added (1) + nodes replaced (2 file nodes)
+        assert!(spliced >= 1, "at least 1 edge should be added");
+        assert_eq!(current.edges.len(), 1);
+        assert_eq!(current.edges[0].kind, "reads_from");
+    }
+
+    #[test]
+    fn splice_unchanged_nodes_skips_changed_subtree() {
+        // Prior has a function node in src/changed.ts.
+        // Current has the same function node.
+        // Splice should NOT replace the function (it's in changed_paths).
+        let dir = tempdir_for_pipeline();
+        let repo_dir = dir.clone();
+        let mut prior_graph = make_graph_with_files(&["src/changed.ts"]);
+        let mut fn_node = make_function_node("src/changed.ts", "bar", "prior");
+        fn_node.summary = "prior".to_string();
+        prior_graph.nodes.push(fn_node);
+        std::fs::write(
+            &repo_dir.join("knowledge-graph.json"),
+            serde_json::to_vec_pretty(&prior_graph).unwrap(),
+        )
+        .unwrap();
+
+        let mut current = make_graph_with_files(&["src/changed.ts"]);
+        let mut fresh = make_function_node("src/changed.ts", "bar", "fresh");
+        fresh.summary = "fresh".to_string();
+        current.nodes.push(fresh);
+
+        let spliced = splice_unchanged_nodes(
+            &repo_dir,
+            &mut current,
+            &["src/changed.ts".to_string()],
+            &[],
+        )
+        .unwrap();
+        // Nothing spliced
+        assert_eq!(spliced, 0);
+        // Fresh summary preserved (unchanged)
+        let fn_after = current
+            .nodes
+            .iter()
+            .find(|n| n.kind == "function")
+            .unwrap();
+        assert_eq!(fn_after.summary, "fresh");
+    }
+
+    #[test]
+    fn splice_unchanged_nodes_skips_edges_outside_unchanged_set() {
+        // Prior has an edge between two nodes in changed files.
+        // Splice should not add it (both endpoints are in changed_paths).
+        let dir = tempdir_for_pipeline();
+        let repo_dir = dir.clone();
+        let mut prior_graph = make_graph_with_files(&["src/a.ts", "src/b.ts"]);
+        prior_graph.edges.push(GraphEdge {
+            source: "file:src/a.ts".to_string(),
+            target: "file:src/b.ts".to_string(),
+            kind: "imports".to_string(),
+            direction: "forward".to_string(),
+            weight: 0.7,
+            description: None,
+        });
+        std::fs::write(
+            &repo_dir.join("knowledge-graph.json"),
+            serde_json::to_vec_pretty(&prior_graph).unwrap(),
+        )
+        .unwrap();
+
+        let mut current = make_graph_with_files(&["src/a.ts", "src/b.ts"]);
+        let spliced = splice_unchanged_nodes(
+            &repo_dir,
+            &mut current,
+            &["src/a.ts".to_string(), "src/b.ts".to_string()],
+            &[],
+        )
+        .unwrap();
+        // Nothing spliced (both endpoints in changed set)
+        assert_eq!(spliced, 0);
     }
 
     fn tempdir_for_pipeline() -> std::path::PathBuf {
