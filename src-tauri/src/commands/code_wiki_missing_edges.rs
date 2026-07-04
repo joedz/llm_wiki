@@ -18,11 +18,11 @@
 
 use std::collections::HashSet;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::commands::code_wiki_pipeline::KnowledgeGraph;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MissingEdgeSuggestion {
     /// Stable rule id, e.g. "service-needs-deploys-or-depends".
     pub rule_id: String,
@@ -34,6 +34,7 @@ pub struct MissingEdgeSuggestion {
     pub edge_kind: String,
     /// Suggested target node id (None = unknown; UI offers
     /// a "let me pick" prompt instead).
+    #[serde(default)]
     pub suggested_target: Option<String>,
     /// "error" | "warning" | "info".
     pub severity: String,

@@ -11,6 +11,7 @@ pub mod code_wiki_chat;
 pub mod code_wiki_diff;
 pub mod code_wiki_edge_rules;
 pub mod code_wiki_missing_edges;
+pub mod code_wiki_auto_fix;
 pub mod code_wiki_domain;
 pub mod code_wiki_explain;
 pub mod code_wiki_ignore;

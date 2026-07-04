@@ -1,15 +1,18 @@
-// P3-A: Missing-edges panel. Shows actionable suggestions from
-// the graph reviewer in a modal. Users see rule_id, severity, and
-// description; clicking "Show" could open the offending file
-// (v2 — not in this commit).
+// P3-A + P4-A: Missing-edges panel. Shows actionable suggestions
+// from the graph reviewer in a modal. P4-A adds the "Auto-fix"
+// button that calls the LLM-driven auto-fix Tauri command.
 
 import { useEffect, useState } from "react"
 import { useTranslation } from "react-i18next"
-import { AlertTriangle, AlertCircle, Info, Loader2, X, Lightbulb } from "lucide-react"
+import { AlertTriangle, AlertCircle, Info, Loader2, X, Lightbulb, Wand2, Check } from "lucide-react"
 import {
+  autoFixMissingEdges,
   getMissingEdges,
+  type AutoFixReport,
   type MissingEdgeSuggestion,
 } from "@/lib/code-wiki/review"
+import { useWikiStore } from "@/stores/wiki-store"
+import { llmSpecFromConfig } from "@/lib/code-wiki/pipeline"
 import { normalizePath } from "@/lib/path-utils"
 import { Button } from "@/components/ui/button"
 
@@ -37,14 +40,20 @@ const SEVERITY_COLOR: Record<MissingEdgeSuggestion["severity"], string> = {
 
 export function MissingEdgesPanel({ open, projectPath, repoName, onClose }: Props) {
   const { t } = useTranslation()
+  const llmConfig = useWikiStore((s) => s.llmConfig)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [suggestions, setSuggestions] = useState<MissingEdgeSuggestion[] | null>(null)
+  const [fixRunning, setFixRunning] = useState(false)
+  const [fixReport, setFixReport] = useState<AutoFixReport | null>(null)
+  const [fixError, setFixError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!open) {
       setSuggestions(null)
       setError(null)
+      setFixReport(null)
+      setFixError(null)
       return
     }
     setLoading(true)
@@ -60,6 +69,29 @@ export function MissingEdgesPanel({ open, projectPath, repoName, onClose }: Prop
       }
     })()
   }, [open, projectPath, repoName])
+
+  const runAutoFix = async (ruleIds: string[] | null) => {
+    setFixRunning(true)
+    setFixError(null)
+    setFixReport(null)
+    try {
+      const llm = llmSpecFromConfig(llmConfig) ?? null
+      const report = await autoFixMissingEdges(
+        normalizePath(projectPath),
+        repoName,
+        ruleIds,
+        llm,
+      )
+      setFixReport(report)
+      // Re-fetch the (now-updated) missing-edges list
+      const result = await getMissingEdges(normalizePath(projectPath), repoName)
+      setSuggestions(result)
+    } catch (e) {
+      setFixError(String(e))
+    } finally {
+      setFixRunning(false)
+    }
+  }
 
   if (!open) return null
 
@@ -79,9 +111,27 @@ export function MissingEdgesPanel({ open, projectPath, repoName, onClose }: Prop
             {t("codeWiki.missingEdges.title", "Missing Edges")} ·{" "}
             <span className="font-mono text-xs text-muted-foreground">{repoName}</span>
           </h3>
-          <Button variant="ghost" size="icon" onClick={onClose}>
-            <X className="h-4 w-4" />
-          </Button>
+          <div className="flex items-center gap-1">
+            {suggestions && suggestions.length > 0 && (
+              <Button
+                size="sm"
+                variant="default"
+                onClick={() => runAutoFix(null)}
+                disabled={fixRunning}
+                data-testid="auto-fix-all-button"
+              >
+                {fixRunning ? (
+                  <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Wand2 className="mr-1 h-3.5 w-3.5" />
+                )}
+                {t("codeWiki.missingEdges.autoFixAll", "Auto-fix all")}
+              </Button>
+            )}
+            <Button variant="ghost" size="icon" onClick={onClose}>
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
         </header>
 
         <div className="flex-1 overflow-auto p-4">
@@ -132,10 +182,50 @@ export function MissingEdgesPanel({ open, projectPath, repoName, onClose }: Prop
             <span>
               {t(
                 "codeWiki.missingEdges.fixHint",
-                "Auto-fix coming in a future update",
+                "Click Auto-fix to add edges via LLM",
               )}
             </span>
           </footer>
+        )}
+
+        {/* P4-A: auto-fix result banner */}
+        {(fixReport || fixError) && (
+          <div
+            className="border-t bg-muted/30 p-3 text-xs"
+            data-testid="auto-fix-result"
+          >
+            {fixError && (
+              <div className="text-red-500">
+                {t("codeWiki.missingEdges.autoFixError", "Auto-fix failed")}:{" "}
+                {fixError}
+              </div>
+            )}
+            {fixReport && (
+              <div className="flex items-center gap-2 text-foreground">
+                <Check className="h-3.5 w-3.5 text-green-500" />
+                <span>
+                  {t(
+                    "codeWiki.missingEdges.autoFixSuccess",
+                    "Added {{added}} edges, dismissed {{dismissed}}, {{remaining}} remaining",
+                    {
+                      added: fixReport.edgesAdded,
+                      dismissed: fixReport.dismissed,
+                      remaining: fixReport.remaining,
+                    },
+                  )}
+                </span>
+              </div>
+            )}
+            {fixReport && fixReport.newEdges.length > 0 && (
+              <ul className="mt-1 space-y-0.5 font-mono text-[10px] text-muted-foreground">
+                {fixReport.newEdges.map((e, i) => (
+                  <li key={i}>
+                    {e.source} --{e.kind}→ {e.target}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         )}
       </div>
     </div>
