@@ -41,13 +41,17 @@ use crate::commands::code_wiki_save::{write_atomic, write_meta, PipelineMeta};
 use crate::llm_client::{call_llm, LlmRequest, LlmResponse};
 
 const DOMAIN_ANALYZER_PROMPT: &str = include_str!("../prompts/domain_analyzer.md");
+const DOMAIN_NARRATIVE_PROMPT: &str = "You are a senior software architect. Given a JSON array of business domains (each with id, name, summary, filePath, kind), produce a JSON response with a `narratives` array. Each entry must have an `id` (matching the input) and a `narrative` (1-2 sentences) explaining what this domain represents in the codebase, why it exists, and what its main responsibility is. Be specific — name the actual concepts, not generic phrases. Output strictly the JSON shape, no markdown.";
+const DOMAIN_CROSS_REFINE_PROMPT: &str = "You are a senior software architect reviewing a set of business domains. Given a JSON object with `domains` (each with id, name, summary, narrative) and `existingCrossDomainEdges` (each with source, target, description), produce a JSON response with two arrays: `new_edges` (additional cross_domain relationships the LLM infers) and `enriched_descriptions` (each with source, target, description — used to update existing edges' descriptions). Each new edge should have source, target, weight (0-1), and description. Only emit edges between existing domain ids. Output strictly JSON, no markdown.";
 const DOMAIN_EVENT: &str = "codewiki-domain-progress";
 const DOMAIN_DONE_EVENT: &str = "codewiki-domain-done";
 const PHASE_SCAN: u32 = 0;
 const PHASE_BUILD: u32 = 1;
 const PHASE_ANALYZE: u32 = 2;
-const PHASE_SAVE: u32 = 3;
-const TOTAL_PHASES: u32 = 4;
+const PHASE_NARRATIVE: u32 = 3;
+const PHASE_CROSS_REFINE: u32 = 4;
+const PHASE_SAVE: u32 = 5;
+const TOTAL_PHASES: u32 = 6;
 
 // ============================================================================
 // Section 1. Schemas
@@ -589,6 +593,221 @@ pub async fn call_domain_llm(
     parse_domain_response(&resp.content)
 }
 
+/// P3-B Phase 2b: per-domain narrative generation. Batches up to
+/// `NARRATIVE_BATCH_SIZE` domains per LLM call to keep token count
+/// bounded. Returns a map from domain id → narrative string; domains
+/// the LLM fails to describe are simply absent from the map.
+pub async fn call_domain_narrative_llm(
+    llm: &LlmRequestSpec,
+    domains: &[DomainNode],
+) -> Result<std::collections::HashMap<String, String>, String> {
+    const NARRATIVE_BATCH_SIZE: usize = 5;
+    let mut out: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for chunk in domains.chunks(NARRATIVE_BATCH_SIZE) {
+        let user_payload = build_narrative_user_payload(chunk);
+        let system = DOMAIN_NARRATIVE_PROMPT.to_string();
+        let mut req: LlmRequest = llm.into_request(system, user_payload);
+        req.temperature = 0.3;
+        let resp: LlmResponse = match call_llm(req, 1).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[code-wiki domain] narrative LLM call failed: {e:?}");
+                continue;
+            }
+        };
+        // Parse response as JSON; tolerate per-call failure.
+        if let Ok(map) = parse_narrative_response(&resp.content) {
+            for (k, v) in map {
+                out.insert(k, v);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn build_narrative_user_payload(domains: &[DomainNode]) -> String {
+    let entries: Vec<serde_json::Value> = domains
+        .iter()
+        .map(|n| {
+            serde_json::json!({
+                "id": n.base.id,
+                "name": n.base.name,
+                "summary": n.base.summary,
+                "filePath": n.base.file_path,
+                "kind": n.base.kind,
+            })
+        })
+        .collect();
+    serde_json::to_string_pretty(&serde_json::json!({ "domains": entries }))
+        .unwrap_or_default()
+}
+
+fn parse_narrative_response(
+    content: &str,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let trimmed = content.trim();
+    let body = if trimmed.starts_with("```") {
+        if let Some(end) = trimmed.rfind("```") {
+            let after_open = trimmed.find('\n').map(|i| i + 1).unwrap_or(3);
+            &trimmed[after_open..end]
+        } else {
+            trimmed
+        }
+    } else {
+        trimmed
+    };
+    let parsed: serde_json::Value = serde_json::from_str(body.trim())
+        .map_err(|e| format!("narrative response not valid JSON: {e}\n---\n{body}\n---"))?;
+    let arr = parsed
+        .get("narratives")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "narrative response missing 'narratives' array".to_string())?;
+    let mut out = std::collections::HashMap::new();
+    for entry in arr {
+        let id = entry
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or("narrative entry missing 'id'")?
+            .to_string();
+        let narrative = entry
+            .get("narrative")
+            .and_then(|v| v.as_str())
+            .ok_or("narrative entry missing 'narrative'")?
+            .to_string();
+        out.insert(id, narrative);
+    }
+    Ok(out)
+}
+
+/// P3-B Phase 2c: cross_domain edge refinement. The LLM is given
+/// the existing domain nodes + cross_domain edges and is asked to
+/// return enriched descriptions + additional edges. Existing
+/// edges with matching (source, target) have their description
+/// updated; new edges are appended.
+pub async fn call_domain_cross_refine_llm(
+    llm: &LlmRequestSpec,
+    domains: &[DomainNode],
+    existing_cross: &[GraphEdge],
+) -> Result<Vec<GraphEdge>, String> {
+    let user_payload = build_cross_refine_user_payload(domains, existing_cross);
+    let system = DOMAIN_CROSS_REFINE_PROMPT.to_string();
+    let mut req: LlmRequest = llm.into_request(system, user_payload);
+    req.temperature = 0.2;
+    let resp: LlmResponse = call_llm(req, 1)
+        .await
+        .map_err(|e| format!("LLM call failed: {e:?}"))?;
+    parse_cross_refine_response(&resp.content, existing_cross)
+}
+
+fn build_cross_refine_user_payload(
+    domains: &[DomainNode],
+    existing_cross: &[GraphEdge],
+) -> String {
+    let domain_entries: Vec<serde_json::Value> = domains
+        .iter()
+        .filter(|n| n.base.kind == "domain")
+        .map(|n| {
+            serde_json::json!({
+                "id": n.base.id,
+                "name": n.base.name,
+                "summary": n.base.summary,
+                "narrative": n.narrative,
+            })
+        })
+        .collect();
+    let existing_entries: Vec<serde_json::Value> = existing_cross
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "source": e.source,
+                "target": e.target,
+                "description": e.description,
+            })
+        })
+        .collect();
+    serde_json::to_string_pretty(&serde_json::json!({
+        "domains": domain_entries,
+        "existingCrossDomainEdges": existing_entries,
+    }))
+    .unwrap_or_default()
+}
+
+fn parse_cross_refine_response(
+    content: &str,
+    existing_cross: &[GraphEdge],
+) -> Result<Vec<GraphEdge>, String> {
+    let trimmed = content.trim();
+    let body = if trimmed.starts_with("```") {
+        if let Some(end) = trimmed.rfind("```") {
+            let after_open = trimmed.find('\n').map(|i| i + 1).unwrap_or(3);
+            &trimmed[after_open..end]
+        } else {
+            trimmed
+        }
+    } else {
+        trimmed
+    };
+    let parsed: serde_json::Value = serde_json::from_str(body.trim())
+        .map_err(|e| format!("cross_refine response not valid JSON: {e}\n---\n{body}\n---"))?;
+    let new_edges_raw = parsed
+        .get("new_edges")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let enriched_raw = parsed
+        .get("enriched_descriptions")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    // Build description map for enrichment
+    let mut description_by_pair: std::collections::HashMap<(String, String), String> =
+        std::collections::HashMap::new();
+    for entry in enriched_raw {
+        let src = entry.get("source").and_then(|v| v.as_str()).map(String::from);
+        let tgt = entry.get("target").and_then(|v| v.as_str()).map(String::from);
+        let desc = entry.get("description").and_then(|v| v.as_str()).map(String::from);
+        if let (Some(s), Some(t), Some(d)) = (src, tgt, desc) {
+            description_by_pair.insert((s, t), d);
+        }
+    }
+
+    // Update existing edges in place
+    let mut out: Vec<GraphEdge> = existing_cross
+        .iter()
+        .map(|e| {
+            let mut e = e.clone();
+            if let Some(d) = description_by_pair.get(&(e.source.clone(), e.target.clone())) {
+                e.description = Some(d.clone());
+            }
+            e
+        })
+        .collect();
+
+    // Append new edges
+    for entry in new_edges_raw {
+        let src = entry.get("source").and_then(|v| v.as_str()).map(String::from);
+        let tgt = entry.get("target").and_then(|v| v.as_str()).map(String::from);
+        let weight = entry.get("weight").and_then(|v| v.as_f64()).unwrap_or(0.5) as f32;
+        let desc = entry
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        if let (Some(s), Some(t)) = (src, tgt) {
+            out.push(GraphEdge {
+                source: s,
+                target: t,
+                kind: "cross_domain".to_string(),
+                direction: "forward".to_string(),
+                weight,
+                description: desc,
+            });
+        }
+    }
+    Ok(out)
+}
+
 fn parse_domain_response(content: &str) -> Result<DomainAnalysis, String> {
     let trimmed = content.trim();
     let body = if trimmed.starts_with("```") {
@@ -987,6 +1206,105 @@ pub async fn run_domain(
             narrative: None,
         });
     }
+
+    // ---- Phase 2b: per-domain narrative (LLM only) ----
+    if let Some(ref spec) = llm {
+        let _ = app.emit(
+            DOMAIN_EVENT,
+            DomainProgress::Phase {
+                pipeline_id: pipeline_id.clone(),
+                phase: PHASE_NARRATIVE,
+                label: "Narrative (LLM)".to_string(),
+                status: "running".to_string(),
+            },
+        );
+        let domains_needing_narrative: Vec<DomainNode> = analysis
+            .nodes
+            .iter()
+            .filter(|n| n.narrative.is_none() && n.base.kind == "domain")
+            .cloned()
+            .collect();
+        if !domains_needing_narrative.is_empty() {
+            match call_domain_narrative_llm(spec, &domains_needing_narrative).await {
+                Ok(narratives) => {
+                    let count = narratives.len();
+                    warnings.push(format!(
+                        "domain narrative LLM wrote {} of {} entries",
+                        count,
+                        domains_needing_narrative.len()
+                    ));
+                    for node in &mut analysis.nodes {
+                        if let Some(n) = narratives.get(&node.base.id) {
+                            node.narrative = Some(n.clone());
+                        }
+                    }
+                }
+                Err(e) => warnings.push(format!("narrative LLM call failed: {e}")),
+            }
+        }
+        let _ = app.emit(
+            DOMAIN_EVENT,
+            DomainProgress::Phase {
+                pipeline_id: pipeline_id.clone(),
+                phase: PHASE_NARRATIVE,
+                label: "Narrative (LLM)".to_string(),
+                status: "done".to_string(),
+            },
+        );
+    }
+
+    // ---- Phase 2c: cross_domain refinement (LLM only) ----
+    if let Some(ref spec) = llm {
+        let existing_cross: Vec<GraphEdge> = analysis
+            .edges
+            .iter()
+            .filter(|e| e.kind == "cross_domain")
+            .cloned()
+            .collect();
+        let domain_nodes: Vec<DomainNode> = analysis
+            .nodes
+            .iter()
+            .filter(|n| n.base.kind == "domain")
+            .cloned()
+            .collect();
+        if !domain_nodes.is_empty() {
+            let _ = app.emit(
+                DOMAIN_EVENT,
+                DomainProgress::Phase {
+                    pipeline_id: pipeline_id.clone(),
+                    phase: PHASE_CROSS_REFINE,
+                    label: "Cross-domain (LLM)".to_string(),
+                    status: "running".to_string(),
+                },
+            );
+            match call_domain_cross_refine_llm(spec, &domain_nodes, &existing_cross).await {
+                Ok(new_edges) => {
+                    let added = new_edges.len() - existing_cross.len();
+                    warnings.push(format!(
+                        "cross_domain refinement: {} existing + {} new edges",
+                        existing_cross.len(),
+                        added.max(0)
+                    ));
+                    // Replace the cross_domain subset in analysis.edges
+                    analysis
+                        .edges
+                        .retain(|e| e.kind != "cross_domain");
+                    analysis.edges.extend(new_edges);
+                }
+                Err(e) => warnings.push(format!("cross_domain LLM call failed: {e}")),
+            }
+            let _ = app.emit(
+                DOMAIN_EVENT,
+                DomainProgress::Phase {
+                    pipeline_id: pipeline_id.clone(),
+                    phase: PHASE_CROSS_REFINE,
+                    label: "Cross-domain (LLM)".to_string(),
+                    status: "done".to_string(),
+                },
+            );
+        }
+    }
+
     let used_llm = llm.is_some();
     let project_meta = build_project_meta(&project_root, &repo_name, &existing_graph, used_llm);
     let mut graph = DomainGraph {
@@ -1572,6 +1890,117 @@ mod tests {
         let json = serde_json::to_string(&node).unwrap();
         // narrative: None should be skipped
         assert!(!json.contains("narrative"));
+    }
+
+    // -- P3-B: narrative + cross_refine parser tests --
+
+    fn make_domain_node(id: &str, name: &str) -> DomainNode {
+        DomainNode {
+            base: GraphNode {
+                id: id.to_string(),
+                kind: "domain".to_string(),
+                name: name.to_string(),
+                file_path: String::new(),
+                summary: String::new(),
+                tags: vec![],
+                complexity: "moderate".to_string(),
+                location: None,
+                language_notes: None,
+            },
+            domain_meta: None,
+            narrative: None,
+        }
+    }
+
+    #[test]
+    fn parse_narrative_response_basic() {
+        let resp = r#"{"narratives": [
+            {"id": "domain:auth", "narrative": "Handles authentication"},
+            {"id": "domain:billing", "narrative": "Handles payment processing"}
+        ]}"#;
+        let map = parse_narrative_response(resp).unwrap();
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get("domain:auth").unwrap(), "Handles authentication");
+    }
+
+    #[test]
+    fn parse_narrative_response_unwraps_fenced_json() {
+        let resp = "```json\n{\"narratives\": [{\"id\": \"d1\", \"narrative\": \"Test\"}]}\n```";
+        let map = parse_narrative_response(resp).unwrap();
+        assert_eq!(map.get("d1").unwrap(), "Test");
+    }
+
+    #[test]
+    fn parse_narrative_response_missing_array_errors() {
+        let resp = r#"{"wrong": "key"}"#;
+        let result = parse_narrative_response(resp);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_narrative_response_invalid_json_errors() {
+        let resp = "not valid json";
+        let result = parse_narrative_response(resp);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_cross_refine_response_appends_new_edges() {
+        let resp = r#"{"new_edges": [
+            {"source": "domain:a", "target": "domain:b", "weight": 0.7, "description": "calls"}
+        ], "enriched_descriptions": []}"#;
+        let existing = vec![GraphEdge {
+            source: "domain:a".to_string(),
+            target: "domain:c".to_string(),
+            kind: "cross_domain".to_string(),
+            direction: "forward".to_string(),
+            weight: 0.5,
+            description: None,
+        }];
+        let out = parse_cross_refine_response(resp, &existing).unwrap();
+        // Should have 2 edges: existing (a→c) + new (a→b)
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().any(|e| e.source == "domain:a" && e.target == "domain:b"));
+        assert!(out.iter().any(|e| e.source == "domain:a" && e.target == "domain:c"));
+    }
+
+    #[test]
+    fn parse_cross_refine_response_enriches_existing_descriptions() {
+        let resp = r#"{"new_edges": [], "enriched_descriptions": [
+            {"source": "domain:a", "target": "domain:b", "description": "sends events to"}
+        ]}"#;
+        let existing = vec![GraphEdge {
+            source: "domain:a".to_string(),
+            target: "domain:b".to_string(),
+            kind: "cross_domain".to_string(),
+            direction: "forward".to_string(),
+            weight: 0.5,
+            description: None,
+        }];
+        let out = parse_cross_refine_response(resp, &existing).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].description.as_deref(), Some("sends events to"));
+    }
+
+    #[test]
+    fn parse_cross_refine_response_invalid_json_errors() {
+        let resp = "not valid json";
+        let result = parse_cross_refine_response(resp, &[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_narrative_user_payload_includes_all_domains() {
+        let domains = vec![
+            make_domain_node("domain:a", "Auth"),
+            make_domain_node("domain:b", "Billing"),
+        ];
+        let payload = build_narrative_user_payload(&domains);
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        let arr = parsed.get("domains").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["id"], "domain:a");
+        assert_eq!(arr[0]["name"], "Auth");
     }
 
     fn make_layer(id: &str, name: &str, node_ids: Vec<String>) -> crate::commands::code_wiki_architecture::Layer {
