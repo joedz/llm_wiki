@@ -93,6 +93,11 @@ pub struct DomainNode {
     pub base: GraphNode,
     #[serde(default, rename = "domainMeta", skip_serializing_if = "Option::is_none")]
     pub domain_meta: Option<DomainMeta>,
+    /// P2-C: 1-2 sentence narrative explaining what this domain /
+    /// flow / step represents. LLM-generated in Phase 2b. Optional
+    /// — template fallback leaves it as None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub narrative: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -652,10 +657,12 @@ fn node_to_domain(n: DomainNodeOrBase) -> DomainNode {
                 language_notes: None,
             },
             domain_meta,
+            narrative: None,
         },
         DomainNodeOrBase::Plain(g) => DomainNode {
             base: g,
             domain_meta: None,
+            narrative: None,
         },
     }
 }
@@ -901,13 +908,17 @@ pub async fn run_domain(
         },
     );
 
-    // ---- Phase 2: LLM analyze (or deterministic fallback).
+    // ---- Phase 2a: structure extraction.
     let _ = app.emit(
         DOMAIN_EVENT,
         DomainProgress::Phase {
             pipeline_id: pipeline_id.clone(),
             phase: PHASE_ANALYZE,
-            label: "Analyze (LLM)".to_string(),
+            label: if llm.is_some() {
+                "Analyze structure (LLM)".to_string()
+            } else {
+                "Analyze structure (template)".to_string()
+            },
             status: "running".to_string(),
         },
     );
@@ -926,15 +937,17 @@ pub async fn run_domain(
                 a
             }
             Err(e) => {
-                warnings.push(format!("LLM domain analysis failed: {e}; producing empty graph"));
-                DomainAnalysis::default()
+                warnings.push(format!(
+                    "LLM domain analysis failed: {e}; falling back to template extraction"
+                ));
+                infer_domains_from_graph(existing_graph.as_ref())
             }
         }
     } else {
         warnings.push(
-            "no LLM configured: domain graph will be empty (no LLM = no analysis)".to_string(),
+            "no LLM configured: extracting domain structure from knowledge-graph layers".to_string(),
         );
-        DomainAnalysis::default()
+        infer_domains_from_graph(existing_graph.as_ref())
     };
 
     // ---- Phase 3: Save.
@@ -971,6 +984,7 @@ pub async fn run_domain(
                 entry_point: None,
                 entry_type: None,
             }),
+            narrative: None,
         });
     }
     let used_llm = llm.is_some();
@@ -1058,6 +1072,179 @@ fn build_project_meta(
     }
 }
 
+/// P2-C: Deterministic template fallback for domain extraction when
+/// no LLM is configured (or the LLM call fails). We map each layer
+/// in the existing knowledge-graph to a domain, each file in the
+/// layer to a flow, and the file's top complex functions to steps.
+///
+/// This is intentionally simple — it gives the user *something* to
+/// visualise even without an LLM, and exposes the architecture
+/// layering that `code_wiki_architecture.rs` already produced.
+pub fn infer_domains_from_graph(graph: Option<&KnowledgeGraph>) -> DomainAnalysis {
+    let mut analysis = DomainAnalysis::default();
+
+    let Some(g) = graph else {
+        // No prior graph → drop a single placeholder domain so the
+        // dashboard isn't entirely empty.
+        analysis.nodes.push(DomainNode {
+            base: GraphNode {
+                id: "domain:no-graph".to_string(),
+                kind: "domain".to_string(),
+                name: "No knowledge graph".to_string(),
+                file_path: String::new(),
+                summary: "Run /understand first to generate a knowledge graph, then re-run the domain pipeline.".to_string(),
+                tags: vec!["placeholder".to_string()],
+                complexity: "simple".to_string(),
+                location: None,
+                language_notes: None,
+            },
+            domain_meta: Some(DomainMeta {
+                entities: Vec::new(),
+                business_rules: Vec::new(),
+                cross_domain_interactions: Vec::new(),
+                entry_point: None,
+                entry_type: None,
+            }),
+            narrative: Some(
+                "Domain knowledge could not be inferred — no prior knowledge graph is available."
+                    .to_string(),
+            ),
+        });
+        return analysis;
+    };
+
+    // Each layer becomes a domain (if it has files).
+    for layer in &g.layers {
+        if layer.node_ids.is_empty() {
+            continue;
+        }
+        let domain_id = format!("domain:{}", layer.id);
+        let first_file = layer
+            .node_ids
+            .iter()
+            .find_map(|nid| g.nodes.iter().find(|n| n.id == *nid))
+            .map(|n| n.file_path.clone())
+            .unwrap_or_default();
+        analysis.nodes.push(DomainNode {
+            base: GraphNode {
+                id: domain_id.clone(),
+                kind: "domain".to_string(),
+                name: layer.name.clone(),
+                file_path: first_file,
+                summary: layer.description.clone(),
+                tags: vec!["inferred".to_string(), "template-fallback".to_string()],
+                complexity: "moderate".to_string(),
+                location: None,
+                language_notes: None,
+            },
+            domain_meta: Some(DomainMeta {
+                entities: Vec::new(),
+                business_rules: Vec::new(),
+                cross_domain_interactions: Vec::new(),
+                entry_point: layer.node_ids.first().cloned(),
+                entry_type: Some("manual".to_string()),
+            }),
+            narrative: Some(format!(
+                "Inferred from layer '{}' (template fallback). LLM is unavailable so cross-domain interactions and entities are empty.",
+                layer.name
+            )),
+        });
+        analysis.edges.push(GraphEdge {
+            source: domain_id.clone(),
+            target: domain_id.clone(),
+            kind: "contains_flow".to_string(),
+            direction: "forward".to_string(),
+            weight: 0.0,
+            description: None,
+        });
+
+        // Each file in the layer becomes a flow.
+        for nid in &layer.node_ids {
+            let file_node = g.nodes.iter().find(|n| n.id == *nid);
+            let Some(file_node) = file_node else { continue };
+            if file_node.kind != "file" {
+                continue;
+            }
+            let flow_id = format!("flow:{}:{}", file_node.file_path, file_node.name);
+            analysis.nodes.push(DomainNode {
+                base: GraphNode {
+                    id: flow_id.clone(),
+                    kind: "flow".to_string(),
+                    name: file_node.name.clone(),
+                    file_path: file_node.file_path.clone(),
+                    summary: file_node.summary.clone(),
+                    tags: file_node.tags.clone(),
+                    complexity: file_node.complexity.clone(),
+                    location: file_node.location.clone(),
+                    language_notes: file_node.language_notes.clone(),
+                },
+                domain_meta: Some(DomainMeta {
+                    entities: Vec::new(),
+                    business_rules: Vec::new(),
+                    cross_domain_interactions: Vec::new(),
+                    entry_point: Some(file_node.file_path.clone()),
+                    entry_type: Some("manual".to_string()),
+                }),
+                narrative: None,
+            });
+            // contains_flow from domain to flow (replace the dummy
+            // self-edge from above with a real one)
+            analysis
+                .edges
+                .retain(|e| !(e.source == domain_id && e.target == domain_id));
+            analysis.edges.push(GraphEdge {
+                source: domain_id.clone(),
+                target: flow_id.clone(),
+                kind: "contains_flow".to_string(),
+                direction: "forward".to_string(),
+                weight: 0.0,
+                description: None,
+            });
+
+            // Top-3 complex functions in this file become steps.
+            let file_funcs: Vec<&GraphNode> = g
+                .nodes
+                .iter()
+                .filter(|n| {
+                    n.kind == "function"
+                        && n.file_path == file_node.file_path
+                        && n.complexity == "complex"
+                })
+                .take(3)
+                .collect();
+            for (i, func) in file_funcs.iter().enumerate() {
+                let step_id = format!("step:{}", func.id);
+                analysis.nodes.push(DomainNode {
+                    base: GraphNode {
+                        id: step_id.clone(),
+                        kind: "step".to_string(),
+                        name: func.name.clone(),
+                        file_path: func.file_path.clone(),
+                        summary: func.summary.clone(),
+                        tags: func.tags.clone(),
+                        complexity: func.complexity.clone(),
+                        location: func.location.clone(),
+                        language_notes: func.language_notes.clone(),
+                    },
+                    domain_meta: None,
+                    narrative: None,
+                });
+                let weight = (i + 1) as f32 / file_funcs.len().max(1) as f32;
+                analysis.edges.push(GraphEdge {
+                    source: flow_id.clone(),
+                    target: step_id,
+                    kind: "flow_step".to_string(),
+                    direction: "forward".to_string(),
+                    weight,
+                    description: None,
+                });
+            }
+        }
+    }
+
+    analysis
+}
+
 fn now_iso() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
@@ -1105,6 +1292,7 @@ mod tests {
                 language_notes: None,
             },
             domain_meta: None,
+            narrative: None,
         }
     }
 
@@ -1159,6 +1347,7 @@ mod tests {
                 entry_point: None,
                 entry_type: None,
             }),
+            narrative: None,
         };
         let json = serde_json::to_value(&node).unwrap();
         let obj = json.as_object().unwrap();
@@ -1182,6 +1371,241 @@ mod tests {
         // When domain_meta is None, the field is skipped entirely.
         assert!(!json.contains("domainMeta"));
         assert!(!json.contains("domain_meta"));
+    }
+
+    // -- P2-C: template fallback + narrative tests --
+
+    fn file_node(path: &str) -> GraphNode {
+        GraphNode {
+            id: format!("file:{path}"),
+            kind: "file".to_string(),
+            name: path.rsplit_once('/').map(|(_, n)| n).unwrap_or(path).to_string(),
+            file_path: path.to_string(),
+            summary: String::new(),
+            tags: vec![],
+            complexity: "moderate".to_string(),
+            location: None,
+            language_notes: None,
+        }
+    }
+
+    fn complex_function(file: &str, qname: &str) -> GraphNode {
+        GraphNode {
+            id: format!("function:{file}:{qname}"),
+            kind: "function".to_string(),
+            name: qname.to_string(),
+            file_path: file.to_string(),
+            summary: String::new(),
+            tags: vec![],
+            complexity: "complex".to_string(),
+            location: None,
+            language_notes: None,
+        }
+    }
+
+    fn layer(id: &str, name: &str, node_ids: Vec<String>) -> crate::commands::code_wiki_architecture::Layer {
+        crate::commands::code_wiki_architecture::Layer {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: format!("Layer {name}"),
+            node_ids,
+        }
+    }
+
+    #[test]
+    fn infer_domains_with_no_graph_returns_placeholder() {
+        let analysis = infer_domains_from_graph(None);
+        assert_eq!(analysis.nodes.len(), 1);
+        assert_eq!(analysis.nodes[0].base.kind, "domain");
+        assert!(analysis.nodes[0].narrative.is_some());
+    }
+
+    #[test]
+    fn infer_domains_creates_one_domain_per_layer() {
+        let g = KnowledgeGraph {
+            version: "1.0.0".to_string(),
+            kind: "codebase".to_string(),
+            project: crate::commands::code_wiki_pipeline::ProjectMeta {
+                name: "test".to_string(),
+                languages: vec![],
+                frameworks: vec![],
+                description: String::new(),
+                analyzed_at: "2026-01-01".to_string(),
+                git_commit_hash: String::new(),
+            },
+            nodes: vec![
+                file_node("src/api.ts"),
+                file_node("src/db.ts"),
+                file_node("src/auth.ts"),
+            ],
+            edges: vec![],
+            layers: vec![
+                layer("L1", "API", vec!["file:src/api.ts".to_string()]),
+                layer("L2", "Data", vec!["file:src/db.ts".to_string()]),
+                layer("L3", "Auth", vec!["file:src/auth.ts".to_string()]),
+            ],
+            tour: vec![],
+        };
+        let analysis = infer_domains_from_graph(Some(&g));
+        let domains: Vec<&DomainNode> = analysis.nodes.iter().filter(|n| n.base.kind == "domain").collect();
+        assert_eq!(domains.len(), 3);
+    }
+
+    #[test]
+    fn infer_domains_creates_flow_per_file() {
+        let g = KnowledgeGraph {
+            version: "1.0.0".to_string(),
+            kind: "codebase".to_string(),
+            project: crate::commands::code_wiki_pipeline::ProjectMeta {
+                name: "test".to_string(),
+                languages: vec![],
+                frameworks: vec![],
+                description: String::new(),
+                analyzed_at: "2026-01-01".to_string(),
+                git_commit_hash: String::new(),
+            },
+            nodes: vec![
+                file_node("src/api.ts"),
+                file_node("src/db.ts"),
+                file_node("src/auth.ts"),
+            ],
+            edges: vec![],
+            layers: vec![layer(
+                "L1",
+                "App",
+                vec![
+                    "file:src/api.ts".to_string(),
+                    "file:src/db.ts".to_string(),
+                    "file:src/auth.ts".to_string(),
+                ],
+            )],
+            tour: vec![],
+        };
+        let analysis = infer_domains_from_graph(Some(&g));
+        let flows: Vec<&DomainNode> = analysis.nodes.iter().filter(|n| n.base.kind == "flow").collect();
+        assert_eq!(flows.len(), 3);
+    }
+
+    #[test]
+    fn infer_domains_creates_steps_for_complex_files() {
+        let g = KnowledgeGraph {
+            version: "1.0.0".to_string(),
+            kind: "codebase".to_string(),
+            project: crate::commands::code_wiki_pipeline::ProjectMeta {
+                name: "test".to_string(),
+                languages: vec![],
+                frameworks: vec![],
+                description: String::new(),
+                analyzed_at: "2026-01-01".to_string(),
+                git_commit_hash: String::new(),
+            },
+            nodes: vec![
+                file_node("src/api.ts"),
+                complex_function("src/api.ts", "handler1"),
+                complex_function("src/api.ts", "handler2"),
+                complex_function("src/api.ts", "handler3"),
+            ],
+            edges: vec![],
+            layers: vec![layer("L1", "App", vec!["file:src/api.ts".to_string()])],
+            tour: vec![],
+        };
+        let analysis = infer_domains_from_graph(Some(&g));
+        let steps: Vec<&DomainNode> = analysis.nodes.iter().filter(|n| n.base.kind == "step").collect();
+        assert_eq!(steps.len(), 3, "all 3 complex functions become steps");
+    }
+
+    #[test]
+    fn infer_domains_emits_contains_flow_edges() {
+        let g = KnowledgeGraph {
+            version: "1.0.0".to_string(),
+            kind: "codebase".to_string(),
+            project: crate::commands::code_wiki_pipeline::ProjectMeta {
+                name: "test".to_string(),
+                languages: vec![],
+                frameworks: vec![],
+                description: String::new(),
+                analyzed_at: "2026-01-01".to_string(),
+                git_commit_hash: String::new(),
+            },
+            nodes: vec![file_node("src/api.ts")],
+            edges: vec![],
+            layers: vec![layer("L1", "App", vec!["file:src/api.ts".to_string()])],
+            tour: vec![],
+        };
+        let analysis = infer_domains_from_graph(Some(&g));
+        let contains_flow_edges: Vec<&GraphEdge> = analysis
+            .edges
+            .iter()
+            .filter(|e| e.kind == "contains_flow")
+            .collect();
+        assert_eq!(contains_flow_edges.len(), 1);
+        assert!(contains_flow_edges[0].source.starts_with("domain:"));
+        assert!(contains_flow_edges[0].target.starts_with("flow:"));
+    }
+
+    #[test]
+    fn domain_node_with_narrative_serializes_correctly() {
+        // Narrative is camelCase via DomainNode's flatten
+        let node = DomainNode {
+            base: GraphNode {
+                id: "domain:auth".to_string(),
+                kind: "domain".to_string(),
+                name: "Auth".to_string(),
+                file_path: String::new(),
+                summary: "Auth domain".to_string(),
+                tags: vec![],
+                complexity: "moderate".to_string(),
+                location: None,
+                language_notes: None,
+            },
+            domain_meta: None,
+            narrative: Some("Handles user authentication and authorization.".to_string()),
+        };
+        let json = serde_json::to_string(&node).unwrap();
+        assert!(json.contains("\"narrative\":\"Handles user authentication"));
+    }
+
+    #[test]
+    fn domain_node_omits_narrative_when_none() {
+        let node = empty_node("flow:auth", "flow");
+        let json = serde_json::to_string(&node).unwrap();
+        // narrative: None should be skipped
+        assert!(!json.contains("narrative"));
+    }
+
+    fn make_layer(id: &str, name: &str, node_ids: Vec<String>) -> crate::commands::code_wiki_architecture::Layer {
+        crate::commands::code_wiki_architecture::Layer {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: format!("Layer {name}"),
+            node_ids,
+        }
+    }
+
+    fn make_project_meta() -> crate::commands::code_wiki_pipeline::ProjectMeta {
+        crate::commands::code_wiki_pipeline::ProjectMeta {
+            name: "test".to_string(),
+            languages: vec![],
+            frameworks: vec![],
+            description: String::new(),
+            analyzed_at: "2026-01-01".to_string(),
+            git_commit_hash: String::new(),
+        }
+    }
+
+    fn make_knowledge_graph(
+        nodes: Vec<GraphNode>,
+        layers: Vec<crate::commands::code_wiki_architecture::Layer>,
+    ) -> KnowledgeGraph {
+        KnowledgeGraph {
+            version: "1.0.0".to_string(),
+            kind: "codebase".to_string(),
+            project: make_project_meta(),
+            nodes,
+            edges: vec![],
+            layers,
+            tour: vec![],
+        }
     }
 
     fn edge(source: &str, target: &str, kind: &str, weight: f32) -> GraphEdge {
