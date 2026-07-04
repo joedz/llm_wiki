@@ -270,6 +270,33 @@ pub async fn code_wiki_get_knowledge_graph(
     .map_err(|e| format!("join error: {}", e))?
 }
 
+/// P3-A: Read the missing-edge suggestions field from meta.json
+/// for a given repo. Returns `None` if the repo hasn't been built
+/// or if the suggestions field is absent (e.g. older builds).
+#[tauri::command]
+pub async fn code_wiki_get_missing_edges(
+    project_path: String,
+    repo_name: String,
+) -> Result<Option<Vec<serde_json::Value>>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = meta_path_for(Path::new(&project_path), &repo_name);
+        match fs::read_to_string(&path) {
+            Ok(raw) => {
+                let v: serde_json::Value = serde_json::from_str(&raw)
+                    .map_err(|e| format!("parse meta: {}", e))?;
+                Ok(v
+                    .get("missingEdgeSuggestions")
+                    .and_then(|s| s.as_array())
+                    .map(|arr| arr.clone()))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("read meta: {}", e)),
+        }
+    })
+    .await
+    .map_err(|e| format!("join error: {}", e))?
+}
+
 #[tauri::command]
 pub async fn code_wiki_list_knowledge_repos(project_path: String) -> Result<Vec<String>, String> {
     tauri::async_runtime::spawn_blocking(move || {

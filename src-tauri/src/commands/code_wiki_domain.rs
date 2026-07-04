@@ -1022,6 +1022,7 @@ pub async fn run_domain(
         removed_file_count: None,
         phase2_skipped_due_to_incremental: None,
         phase2_skip_reason: None,
+        missing_edge_suggestions: None,
     };
     write_meta(&meta_path, &meta).map_err(|e| format!("write meta: {e}"))?;
 

@@ -89,6 +89,11 @@ pub struct PipelineMeta {
     /// (or `None` if Phase 2 ran normally).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase2_skip_reason: Option<String>,
+    /// P3-A: actionable missing-edge suggestions produced by the
+    /// graph reviewer. Surfaced in the dashboard's "Missing Edges"
+    /// panel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing_edge_suggestions: Option<Vec<serde_json::Value>>,
 }
 
 /// Write `meta.json` atomically. Caller owns the shape; this just

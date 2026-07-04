@@ -18,6 +18,7 @@ import {
   HelpCircle,
   MessageCircle,
   ScrollText,
+  Lightbulb,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useWikiStore } from "@/stores/wiki-store"
@@ -38,6 +39,7 @@ import { ExplainModal } from "./explain-modal"
 import { ChatPanel } from "./chat-panel"
 import { OnboardModal } from "./onboard-modal"
 import { DomainView } from "./domain-view"
+import { MissingEdgesPanel } from "./missing-edges-panel"
 import { useCodeWikiPersonaStore } from "@/stores/code-wiki-persona-store"
 import { normalizePath } from "@/lib/path-utils"
 import { useTranslation } from "react-i18next"
@@ -123,6 +125,7 @@ export function CodeWikiView() {
   const [chatRepo, setChatRepo] = useState<string | null>(null)
   const [onboardRepo, setOnboardRepo] = useState<string | null>(null)
   const [domainViewRepo, setDomainViewRepo] = useState<string | null>(null)
+  const [missingEdgesRepo, setMissingEdgesRepo] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     if (!project) return
@@ -485,6 +488,7 @@ export function CodeWikiView() {
                 onChat={() => setChatRepo(repo.name)}
                 onOnboard={() => setOnboardRepo(repo.name)}
                 onDomainView={() => setDomainViewRepo(repo.name)}
+                onMissingEdges={() => setMissingEdgesRepo(repo.name)}
                 knowledgeBuilding={
                   (useKnowledgeStore.getState().byProject[project?.path ?? ""]?.repoName === repo.name) &&
                   useKnowledgeStore.getState().byProject[project?.path ?? ""]?.result === "running"
@@ -530,6 +534,14 @@ export function CodeWikiView() {
           projectPath={project.path}
           repoName={domainViewRepo}
           onClose={() => setDomainViewRepo(null)}
+        />
+      )}
+      {project && missingEdgesRepo && (
+        <MissingEdgesPanel
+          open={Boolean(missingEdgesRepo)}
+          projectPath={project.path}
+          repoName={missingEdgesRepo}
+          onClose={() => setMissingEdgesRepo(null)}
         />
       )}
     </div>
@@ -592,6 +604,7 @@ function RepoRow({
   onChat: () => void
   onOnboard: () => void
   onDomainView: () => void
+  onMissingEdges: () => void
   knowledgeBuilding: boolean
   domainBuilding: boolean
   hasKnowledge: boolean
@@ -775,8 +788,19 @@ function RepoRow({
             title={t("codeWiki.domainViewTooltip", "Visualise the domain graph")}
             data-testid="domain-view-button"
           >
-            <Network className="mr-1 h-3.5 w-3.5" />
+<Network className="mr-1 h-3.5 w-3.5" />
             {t("codeWiki.domainViewShort", "Domain View")}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onMissingEdges}
+            disabled={!built}
+            title={t("codeWiki.missingEdgesTooltip", "View graph reviewer's missing-edge suggestions")}
+            data-testid="missing-edges-button"
+          >
+            <Lightbulb className="mr-1 h-3.5 w-3.5" />
+            {t("codeWiki.missingEdgesShort", "Suggestions")}
           </Button>
         </div>
       </div>

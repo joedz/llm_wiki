@@ -879,6 +879,21 @@ async fn run_pipeline_orchestrator(
         emit_warning(app, pipeline_id, 9, &msg);
         return Err(msg);
     }
+    // P3-A: serialise the missing-edge suggestions produced by the
+// graph reviewer so the dashboard can surface them in its
+// "Missing Edges" panel without re-running the pipeline.
+    let missing_edge_suggestions_value: Option<Vec<serde_json::Value>> = if review.missing_edges.is_empty() {
+        None
+    } else {
+        Some(
+            review
+                .missing_edges
+                .iter()
+                .filter_map(|s| serde_json::to_value(s).ok())
+                .collect(),
+        )
+    };
+
     let meta = crate::commands::code_wiki_save::PipelineMeta {
         last_analyzed_at: now_iso(),
         git_commit_hash: scan.git_commit_hash.clone(),
@@ -895,6 +910,7 @@ async fn run_pipeline_orchestrator(
         removed_file_count: Some(removed_count),
         phase2_skipped_due_to_incremental: if phase2_skipped { Some(true) } else { None },
         phase2_skip_reason,
+        missing_edge_suggestions: missing_edge_suggestions_value,
     };
     let meta_path = repo_dir.join(META_FILE);
     if let Err(e) = crate::commands::code_wiki_save::write_meta(&meta_path, &meta) {

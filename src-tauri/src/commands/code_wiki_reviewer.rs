@@ -40,6 +40,11 @@ pub struct GraphStats {
 pub struct ReviewReport {
     pub issues: Vec<ReviewIssue>,
     pub stats: GraphStats,
+    /// P3-A: actionable hints about which edges the graph is
+    /// likely missing. Surfaced in the dashboard's "Missing Edges"
+    /// panel.
+    #[serde(default)]
+    pub missing_edges: Vec<crate::commands::code_wiki_missing_edges::MissingEdgeSuggestion>,
 }
 
 /// Run the inline validation. Always returns OK — issues are
@@ -183,7 +188,15 @@ pub fn review_graph(
     stats.total_layers = layers.len() as u32;
     stats.tour_steps = tour.len() as u32;
 
-    ReviewReport { issues, stats }
+    // P3-A: detect missing edges via the rules module.
+    let missing_edges =
+        crate::commands::code_wiki_missing_edges::detect_missing_edges(graph);
+
+    ReviewReport {
+        issues,
+        stats,
+        missing_edges,
+    }
 }
 
 #[cfg(test)]

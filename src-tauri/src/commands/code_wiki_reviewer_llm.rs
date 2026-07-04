@@ -228,6 +228,7 @@ mod tests {
                 orphan_nodes: 1,
                 languages: Default::default(),
             },
+            missing_edges: vec![],
         }
     }
 
