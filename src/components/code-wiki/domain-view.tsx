@@ -12,7 +12,14 @@
 
 import { useEffect, useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
-import { Loader2, Network, X, ArrowLeft } from "lucide-react"
+import {
+  Loader2,
+  Network,
+  X,
+  ArrowLeft,
+  AlertTriangle,
+  Lightbulb,
+} from "lucide-react"
 import Graph from "graphology"
 import forceAtlas2 from "graphology-layout-forceatlas2"
 import { SigmaContainer, useLoadGraph, useRegisterEvents } from "@react-sigma/core"
@@ -51,6 +58,7 @@ export function DomainView({ open, projectPath, repoName, onClose }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [graph, setGraph] = useState<DomainGraphT | null>(null)
   const [activeDomainId, setActiveDomainId] = useState<string | null>(null)
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
 
   useEffect(() => {
     if (!open) {
@@ -185,6 +193,10 @@ export function DomainView({ open, projectPath, repoName, onClose }: Props) {
                     if (node && node.type === "domain") {
                       setActiveDomainId(id)
                     }
+                  } else {
+                    // Detail mode: clicking a node selects it for
+                    // the structured-fields panel.
+                    setSelectedNodeId(id)
                   }
                 }}
               />
@@ -204,6 +216,14 @@ export function DomainView({ open, projectPath, repoName, onClose }: Props) {
               </span>
             )}
           </footer>
+
+          {/* P4-B: structured-fields panel for the selected node */}
+          {selectedNodeId && graph && (
+            <NodeDetailPanel
+              node={graph.nodes.find((n) => n.id === selectedNodeId) ?? null}
+              onClose={() => setSelectedNodeId(null)}
+            />
+          )}
         )}
       </div>
     </div>
@@ -353,4 +373,116 @@ function GraphLoader({ graph, activeDomainId, onNodeClick }: GraphLoaderProps) {
   }, [onNodeClick, registerEvents, activeDomainId]);
 
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// P4-B: structured-fields detail panel
+// ---------------------------------------------------------------------------
+
+interface NodeDetailPanelProps {
+  node: DomainGraphT["nodes"][number] | null
+  onClose: () => void
+}
+
+function NodeDetailPanel({ node, onClose }: NodeDetailPanelProps) {
+  const { t } = useTranslation()
+  if (!node) return null
+  const hasContent =
+    !!node.narrative ||
+    (node.keyConcepts && node.keyConcepts.length > 0) ||
+    (node.risks && node.risks.length > 0) ||
+    !!node.metrics
+  if (!hasContent) return null
+  return (
+    <div
+      className="absolute right-3 top-3 z-10 w-72 max-h-[60vh] overflow-auto rounded-md border bg-card p-3 shadow-lg"
+      data-testid={`node-detail-panel-${node.id}`}
+    >
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="truncate text-xs font-semibold">{node.name}</div>
+          <div className="truncate font-mono text-[10px] text-muted-foreground">
+            {node.id}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="text-muted-foreground hover:text-foreground"
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </div>
+
+      {node.narrative && (
+        <div className="mb-2 text-xs leading-relaxed text-foreground">
+          {node.narrative}
+        </div>
+      )}
+
+      {node.keyConcepts && node.keyConcepts.length > 0 && (
+        <div className="mb-2">
+          <div className="mb-1 flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            <Lightbulb className="h-3 w-3" />
+            {t("codeWiki.domainView.concepts", "Concepts")}
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {node.keyConcepts.map((c, i) => (
+              <span
+                key={i}
+                className="rounded-full bg-blue-100 px-2 py-0.5 text-[10px] text-blue-800 dark:bg-blue-950 dark:text-blue-300"
+              >
+                {c}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {node.risks && node.risks.length > 0 && (
+        <div className="mb-2">
+          <div className="mb-1 flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            <AlertTriangle className="h-3 w-3 text-amber-500" />
+            {t("codeWiki.domainView.risks", "Risks")}
+          </div>
+          <ul className="space-y-0.5 text-[11px]">
+            {node.risks.map((r, i) => (
+              <li key={i} className="flex gap-1">
+                <span className="text-amber-500">•</span>
+                <span>{r}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {node.metrics && (
+        <div>
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            {t("codeWiki.domainView.metrics", "Metrics")}
+          </div>
+          <div className="grid grid-cols-2 gap-1 text-[11px]">
+            <Metric label="Files" value={node.metrics.fileCount} />
+            <Metric label="Functions" value={node.metrics.functionCount} />
+            <Metric label="Edges" value={node.metrics.edgeCount} />
+            <Metric
+              label="Complexity"
+              value={node.metrics.complexityAvg.toFixed(2)}
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function Metric({ label, value }: { label: string; value: number | string }) {
+  return (
+    <div className="rounded bg-muted/50 px-2 py-1">
+      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+        {label}
+      </div>
+      <div className="font-mono text-sm">{value}</div>
+    </div>
+  )
 }

@@ -121,6 +121,22 @@ export interface DomainGraphNode {
   complexity?: "simple" | "moderate" | "complex"
   location?: { startLine: number; endLine: number }
   domainMeta?: DomainMeta
+  /** P2-C: 1-2 sentence narrative explaining what this domain/flow/step represents. */
+  narrative?: string
+  /** P4-B: 3-5 key concepts (LLM-extracted noun phrases). */
+  keyConcepts?: string[]
+  /** P4-B: potential risks (LLM-extracted). */
+  risks?: string[]
+  /** P4-B: quantitative metrics. */
+  metrics?: DomainMetrics
+}
+
+export interface DomainMetrics {
+  fileCount: number
+  functionCount: number
+  edgeCount: number
+  /** Average complexity in [1.0, 3.0] (simple=1, moderate=2, complex=3). */
+  complexityAvg: number
 }
 
 export interface DomainGraphEdge {

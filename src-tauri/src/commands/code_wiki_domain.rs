@@ -41,7 +41,15 @@ use crate::commands::code_wiki_save::{write_atomic, write_meta, PipelineMeta};
 use crate::llm_client::{call_llm, LlmRequest, LlmResponse};
 
 const DOMAIN_ANALYZER_PROMPT: &str = include_str!("../prompts/domain_analyzer.md");
-const DOMAIN_NARRATIVE_PROMPT: &str = "You are a senior software architect. Given a JSON array of business domains (each with id, name, summary, filePath, kind), produce a JSON response with a `narratives` array. Each entry must have an `id` (matching the input) and a `narrative` (1-2 sentences) explaining what this domain represents in the codebase, why it exists, and what its main responsibility is. Be specific — name the actual concepts, not generic phrases. Output strictly the JSON shape, no markdown.";
+const DOMAIN_NARRATIVE_PROMPT: &str = "You are a senior software architect. Given a JSON array of business domains (each with id, name, summary, filePath, kind), produce a JSON response with a `narratives` array. Each entry must have:
+
+- id: matching the input
+- narrative: 1-2 sentences explaining what this domain represents
+- key_concepts: array of 3-5 short noun phrases naming the core concepts (e.g. \"JWT auth\", \"RBAC\"). Empty array if none.
+- risks: array of 1-3 potential risk areas (e.g. \"no rate limiting on login\"). Empty array if none.
+- metrics: { fileCount, functionCount, edgeCount, complexityAvg } where complexityAvg is the average of {1=simple, 2=moderate, 3=complex} across the domain's nodes. Estimate from the input. Omit the field if you can't estimate.
+
+Output strictly JSON, no markdown.";
 const DOMAIN_CROSS_REFINE_PROMPT: &str = "You are a senior software architect reviewing a set of business domains. Given a JSON object with `domains` (each with id, name, summary, narrative) and `existingCrossDomainEdges` (each with source, target, description), produce a JSON response with two arrays: `new_edges` (additional cross_domain relationships the LLM infers) and `enriched_descriptions` (each with source, target, description — used to update existing edges' descriptions). Each new edge should have source, target, weight (0-1), and description. Only emit edges between existing domain ids. Output strictly JSON, no markdown.";
 const DOMAIN_EVENT: &str = "codewiki-domain-progress";
 const DOMAIN_DONE_EVENT: &str = "codewiki-domain-done";
@@ -87,6 +95,18 @@ pub struct DomainGraph {
     pub derived_from_graph: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DomainMetrics {
+    pub file_count: u32,
+    pub function_count: u32,
+    pub edge_count: u32,
+    /// Average complexity as f32 in [0.0, 3.0] (simple=1,
+    /// moderate=2, complex=3).
+    #[serde(default)]
+    pub complexity_avg: f32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DomainNode {
     /// P1-C: flatten GraphNode into the parent so the on-disk shape
@@ -102,6 +122,16 @@ pub struct DomainNode {
     /// — template fallback leaves it as None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub narrative: Option<String>,
+    /// P4-B: 3-5 key concepts (LLM-extracted noun phrases).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_concepts: Option<Vec<String>>,
+    /// P4-B: potential risks (LLM-extracted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risks: Option<Vec<String>>,
+    /// P4-B: quantitative metrics (LLM-extracted or computed by
+    /// the template fallback for deterministic repos).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<DomainMetrics>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -593,17 +623,17 @@ pub async fn call_domain_llm(
     parse_domain_response(&resp.content)
 }
 
-/// P3-B Phase 2b: per-domain narrative generation. Batches up to
-/// `NARRATIVE_BATCH_SIZE` domains per LLM call to keep token count
-/// bounded. Returns a map from domain id → narrative string; domains
-/// the LLM fails to describe are simply absent from the map.
+/// P3-B + P4-B Phase 2b: per-domain narrative + structured
+/// fields. Batches up to `NARRATIVE_BATCH_SIZE` domains per LLM
+/// call to keep token count bounded. Returns a map from domain id
+/// → `LlmNarrativeEntry` (narrative + key_concepts + risks +
+/// metrics). Domains the LLM fails to describe are simply absent.
 pub async fn call_domain_narrative_llm(
     llm: &LlmRequestSpec,
     domains: &[DomainNode],
-) -> Result<std::collections::HashMap<String, String>, String> {
+) -> Result<NarrativeMap, String> {
     const NARRATIVE_BATCH_SIZE: usize = 5;
-    let mut out: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
+    let mut out: NarrativeMap = std::collections::HashMap::new();
     for chunk in domains.chunks(NARRATIVE_BATCH_SIZE) {
         let user_payload = build_narrative_user_payload(chunk);
         let system = DOMAIN_NARRATIVE_PROMPT.to_string();
@@ -643,9 +673,27 @@ fn build_narrative_user_payload(domains: &[DomainNode]) -> String {
         .unwrap_or_default()
 }
 
+/// P4-B: extended narrative response shape. Each entry carries
+/// narrative + optional structured fields.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct LlmNarrativeEntry {
+    #[serde(default)]
+    pub narrative: String,
+    #[serde(default)]
+    pub key_concepts: Vec<String>,
+    #[serde(default)]
+    pub risks: Vec<String>,
+    #[serde(default)]
+    pub metrics: Option<DomainMetrics>,
+}
+
+/// P4-B: per-id narrative result. Keys are domain ids; values
+/// are the LLM-emitted narrative + structured fields.
+pub type NarrativeMap = std::collections::HashMap<String, LlmNarrativeEntry>;
+
 fn parse_narrative_response(
     content: &str,
-) -> Result<std::collections::HashMap<String, String>, String> {
+) -> Result<NarrativeMap, String> {
     let trimmed = content.trim();
     let body = if trimmed.starts_with("```") {
         if let Some(end) = trimmed.rfind("```") {
@@ -663,19 +711,16 @@ fn parse_narrative_response(
         .get("narratives")
         .and_then(|v| v.as_array())
         .ok_or_else(|| "narrative response missing 'narratives' array".to_string())?;
-    let mut out = std::collections::HashMap::new();
+    let mut out: NarrativeMap = std::collections::HashMap::new();
     for entry in arr {
         let id = entry
             .get("id")
             .and_then(|v| v.as_str())
             .ok_or("narrative entry missing 'id'")?
             .to_string();
-        let narrative = entry
-            .get("narrative")
-            .and_then(|v| v.as_str())
-            .ok_or("narrative entry missing 'narrative'")?
-            .to_string();
-        out.insert(id, narrative);
+        let entry: LlmNarrativeEntry = serde_json::from_value(entry.clone())
+            .map_err(|e| format!("narrative entry shape invalid: {e}"))?;
+        out.insert(id, entry);
     }
     Ok(out)
 }
@@ -877,11 +922,17 @@ fn node_to_domain(n: DomainNodeOrBase) -> DomainNode {
             },
             domain_meta,
             narrative: None,
+            key_concepts: None,
+            risks: None,
+            metrics: None,
         },
         DomainNodeOrBase::Plain(g) => DomainNode {
             base: g,
             domain_meta: None,
             narrative: None,
+            key_concepts: None,
+            risks: None,
+            metrics: None,
         },
     }
 }
@@ -1204,6 +1255,9 @@ pub async fn run_domain(
                 entry_type: None,
             }),
             narrative: None,
+            key_concepts: None,
+            risks: None,
+            metrics: None,
         });
     }
 
@@ -1235,7 +1289,18 @@ pub async fn run_domain(
                     ));
                     for node in &mut analysis.nodes {
                         if let Some(n) = narratives.get(&node.base.id) {
-                            node.narrative = Some(n.clone());
+                            if !n.narrative.is_empty() {
+                                node.narrative = Some(n.narrative.clone());
+                            }
+                            if !n.key_concepts.is_empty() {
+                                node.key_concepts = Some(n.key_concepts.clone());
+                            }
+                            if !n.risks.is_empty() {
+                                node.risks = Some(n.risks.clone());
+                            }
+                            if let Some(metrics) = n.metrics.clone() {
+                                node.metrics = Some(metrics);
+                            }
                         }
                     }
                 }
@@ -1399,6 +1464,65 @@ fn build_project_meta(
 /// This is intentionally simple — it gives the user *something* to
 /// visualise even without an LLM, and exposes the architecture
 /// layering that `code_wiki_architecture.rs` already produced.
+/// P4-B: compute deterministic metrics for a layer-derived domain.
+/// Used by the template fallback so even non-LLM repos get a
+/// useful `metrics` block.
+fn compute_layer_metrics(
+    layer: &crate::commands::code_wiki_architecture::Layer,
+    g: &KnowledgeGraph,
+) -> DomainMetrics {
+    let layer_node_ids: HashSet<&str> =
+        layer.node_ids.iter().map(|s| s.as_str()).collect();
+
+    let layer_files: Vec<&GraphNode> = g
+        .nodes
+        .iter()
+        .filter(|n| n.kind == "file" && layer_node_ids.contains(n.id.as_str()))
+        .collect();
+
+    let file_count = layer_files.len() as u32;
+    let function_count = g
+        .nodes
+        .iter()
+        .filter(|n| n.kind == "function"
+            && layer_files.iter().any(|f| f.file_path == n.file_path))
+        .count() as u32;
+    let edge_count = g
+        .edges
+        .iter()
+        .filter(|e| {
+            layer_node_ids.contains(e.source.as_str())
+                || layer_node_ids.contains(e.target.as_str())
+        })
+        .count() as u32;
+
+    // Average complexity across all nodes in the layer
+    // (simple=1, moderate=2, complex=3)
+    let complexity_sum: f32 = g
+        .nodes
+        .iter()
+        .filter(|n| layer_node_ids.contains(n.id.as_str()))
+        .map(|n| match n.complexity.as_str() {
+            "simple" => 1.0,
+            "complex" => 3.0,
+            _ => 2.0,
+        })
+        .sum();
+    let complexity_count = layer_node_ids.len().max(1) as f32;
+    let complexity_avg = if layer_node_ids.is_empty() {
+        0.0
+    } else {
+        complexity_sum / complexity_count
+    };
+
+    DomainMetrics {
+        file_count,
+        function_count,
+        edge_count,
+        complexity_avg,
+    }
+}
+
 pub fn infer_domains_from_graph(graph: Option<&KnowledgeGraph>) -> DomainAnalysis {
     let mut analysis = DomainAnalysis::default();
 
@@ -1428,6 +1552,9 @@ pub fn infer_domains_from_graph(graph: Option<&KnowledgeGraph>) -> DomainAnalysi
                 "Domain knowledge could not be inferred — no prior knowledge graph is available."
                     .to_string(),
             ),
+            key_concepts: None,
+            risks: None,
+            metrics: None,
         });
         return analysis;
     };
@@ -1467,6 +1594,13 @@ pub fn infer_domains_from_graph(graph: Option<&KnowledgeGraph>) -> DomainAnalysi
                 "Inferred from layer '{}' (template fallback). LLM is unavailable so cross-domain interactions and entities are empty.",
                 layer.name
             )),
+            key_concepts: None,
+            risks: None,
+            // P4-B: template fallback computes metrics deterministically
+            // (file count = layer nodes, edge count = edges incident
+            // to any node in this layer, complexity_avg = avg across
+            // file-level nodes).
+            metrics: Some(compute_layer_metrics(&layer, g)),
         });
         analysis.edges.push(GraphEdge {
             source: domain_id.clone(),
@@ -1505,6 +1639,9 @@ pub fn infer_domains_from_graph(graph: Option<&KnowledgeGraph>) -> DomainAnalysi
                     entry_type: Some("manual".to_string()),
                 }),
                 narrative: None,
+                key_concepts: None,
+                risks: None,
+                metrics: None,
             });
             // contains_flow from domain to flow (replace the dummy
             // self-edge from above with a real one)
@@ -1547,6 +1684,9 @@ pub fn infer_domains_from_graph(graph: Option<&KnowledgeGraph>) -> DomainAnalysi
                     },
                     domain_meta: None,
                     narrative: None,
+                    key_concepts: None,
+                    risks: None,
+                    metrics: None,
                 });
                 let weight = (i + 1) as f32 / file_funcs.len().max(1) as f32;
                 analysis.edges.push(GraphEdge {
@@ -1612,6 +1752,9 @@ mod tests {
             },
             domain_meta: None,
             narrative: None,
+            key_concepts: None,
+            risks: None,
+            metrics: None,
         }
     }
 
@@ -1667,6 +1810,9 @@ mod tests {
                 entry_type: None,
             }),
             narrative: None,
+            key_concepts: None,
+            risks: None,
+            metrics: None,
         };
         let json = serde_json::to_value(&node).unwrap();
         let obj = json.as_object().unwrap();
@@ -1879,6 +2025,9 @@ mod tests {
             },
             domain_meta: None,
             narrative: Some("Handles user authentication and authorization.".to_string()),
+            key_concepts: None,
+            risks: None,
+            metrics: None,
         };
         let json = serde_json::to_string(&node).unwrap();
         assert!(json.contains("\"narrative\":\"Handles user authentication"));
@@ -1909,6 +2058,9 @@ mod tests {
             },
             domain_meta: None,
             narrative: None,
+            key_concepts: None,
+            risks: None,
+            metrics: None,
         }
     }
 
@@ -1920,14 +2072,14 @@ mod tests {
         ]}"#;
         let map = parse_narrative_response(resp).unwrap();
         assert_eq!(map.len(), 2);
-        assert_eq!(map.get("domain:auth").unwrap(), "Handles authentication");
+        assert_eq!(map.get("domain:auth").unwrap().narrative, "Handles authentication");
     }
 
     #[test]
     fn parse_narrative_response_unwraps_fenced_json() {
         let resp = "```json\n{\"narratives\": [{\"id\": \"d1\", \"narrative\": \"Test\"}]}\n```";
         let map = parse_narrative_response(resp).unwrap();
-        assert_eq!(map.get("d1").unwrap(), "Test");
+        assert_eq!(map.get("d1").unwrap().narrative, "Test");
     }
 
     #[test]
@@ -1942,6 +2094,178 @@ mod tests {
         let resp = "not valid json";
         let result = parse_narrative_response(resp);
         assert!(result.is_err());
+    }
+
+    // -- P4-B: structured narrative fields tests --
+
+    #[test]
+    fn parse_narrative_response_includes_key_concepts() {
+        let resp = r#"{"narratives": [
+            {"id": "d1", "narrative": "Auth", "key_concepts": ["JWT", "RBAC", "session"]}
+        ]}"#;
+        let map = parse_narrative_response(resp).unwrap();
+        let entry = map.get("d1").unwrap();
+        assert_eq!(entry.key_concepts, vec!["JWT", "RBAC", "session"]);
+    }
+
+    #[test]
+    fn parse_narrative_response_includes_risks() {
+        let resp = r#"{"narratives": [
+            {"id": "d1", "narrative": "Auth", "risks": ["no rate limiting", "weak session timeout"]}
+        ]}"#;
+        let map = parse_narrative_response(resp).unwrap();
+        let entry = map.get("d1").unwrap();
+        assert_eq!(entry.risks.len(), 2);
+        assert!(entry.risks.contains(&"no rate limiting".to_string()));
+    }
+
+    #[test]
+    fn parse_narrative_response_includes_metrics() {
+        let resp = r#"{"narratives": [
+            {"id": "d1", "narrative": "Auth", "metrics": {
+                "fileCount": 5, "functionCount": 12, "edgeCount": 8, "complexityAvg": 2.4
+            }}
+        ]}"#;
+        let map = parse_narrative_response(resp).unwrap();
+        let entry = map.get("d1").unwrap();
+        let metrics = entry.metrics.as_ref().unwrap();
+        assert_eq!(metrics.file_count, 5);
+        assert_eq!(metrics.function_count, 12);
+        assert_eq!(metrics.edge_count, 8);
+        assert!((metrics.complexity_avg - 2.4).abs() < 0.01);
+    }
+
+    #[test]
+    fn parse_narrative_response_tolerates_missing_structured_fields() {
+        // LLM only fills narrative; key_concepts/risks/metrics default to None/empty
+        let resp = r#"{"narratives": [
+            {"id": "d1", "narrative": "Auth"}
+        ]}"#;
+        let map = parse_narrative_response(resp).unwrap();
+        let entry = map.get("d1").unwrap();
+        assert_eq!(entry.narrative, "Auth");
+        assert!(entry.key_concepts.is_empty());
+        assert!(entry.risks.is_empty());
+        assert!(entry.metrics.is_none());
+    }
+
+    #[test]
+    fn domain_node_omits_empty_structured_fields_in_json() {
+        let node = empty_node("d1", "domain");
+        let json = serde_json::to_string(&node).unwrap();
+        // Empty key_concepts/risks/metrics should be skipped
+        assert!(!json.contains("keyConcepts"));
+        assert!(!json.contains("risks"));
+        assert!(!json.contains("metrics"));
+    }
+
+    #[test]
+    fn domain_metrics_serializes_camel_case() {
+        let metrics = DomainMetrics {
+            file_count: 1,
+            function_count: 2,
+            edge_count: 3,
+            complexity_avg: 1.5,
+        };
+        let json = serde_json::to_value(&metrics).unwrap();
+        assert_eq!(json["fileCount"], 1);
+        assert_eq!(json["functionCount"], 2);
+        assert_eq!(json["edgeCount"], 3);
+        assert_eq!(json["complexityAvg"], 1.5);
+    }
+
+    #[test]
+    fn compute_layer_metrics_counts_files_and_edges() {
+        // Build a small graph with 3 files in a layer + 1 function
+        // + 2 edges and verify the metrics.
+        let g = KnowledgeGraph {
+            version: "1.0.0".to_string(),
+            kind: "codebase".to_string(),
+            project: crate::commands::code_wiki_pipeline::ProjectMeta {
+                name: "t".to_string(),
+                languages: vec![],
+                frameworks: vec![],
+                description: String::new(),
+                analyzed_at: "2026-01-01".to_string(),
+                git_commit_hash: String::new(),
+            },
+            nodes: vec![
+                file_node("src/a.ts"),
+                file_node("src/b.ts"),
+                file_node("src/c.ts"),
+                complex_function("src/a.ts", "f1"),
+            ],
+            edges: vec![
+                GraphEdge {
+                    source: "function:src/a.ts:f1".to_string(),
+                    target: "file:src/a.ts".to_string(),
+                    kind: "calls".to_string(),
+                    direction: "forward".to_string(),
+                    weight: 1.0,
+                    description: None,
+                },
+                GraphEdge {
+                    source: "file:src/a.ts".to_string(),
+                    target: "file:src/b.ts".to_string(),
+                    kind: "imports".to_string(),
+                    direction: "forward".to_string(),
+                    weight: 0.7,
+                    description: None,
+                },
+            ],
+            layers: vec![layer(
+                "L1",
+                "App",
+                vec![
+                    "file:src/a.ts".to_string(),
+                    "file:src/b.ts".to_string(),
+                    "file:src/c.ts".to_string(),
+                ],
+            )],
+            tour: vec![],
+        };
+        let metrics = compute_layer_metrics(&g.layers[0], &g);
+        assert_eq!(metrics.file_count, 3);
+        assert_eq!(metrics.function_count, 1);
+        assert_eq!(metrics.edge_count, 2);
+        // Average across 3 files in layer (each moderate=2.0):
+        // (2+2+2)/3 = 2.0. The function is not in the layer
+        // (functions are tracked separately by file_path), so it
+        // doesn't count toward the layer's complexity_avg.
+        assert!((metrics.complexity_avg - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn infer_domains_fills_metrics_for_template_fallback() {
+        // When no LLM is configured, infer_domains_from_graph
+        // should still populate metrics (deterministic).
+        let g = KnowledgeGraph {
+            version: "1.0.0".to_string(),
+            kind: "codebase".to_string(),
+            project: crate::commands::code_wiki_pipeline::ProjectMeta {
+                name: "t".to_string(),
+                languages: vec![],
+                frameworks: vec![],
+                description: String::new(),
+                analyzed_at: "2026-01-01".to_string(),
+                git_commit_hash: String::new(),
+            },
+            nodes: vec![file_node("src/api.ts")],
+            edges: vec![],
+            layers: vec![layer("L1", "API", vec!["file:src/api.ts".to_string()])],
+            tour: vec![],
+        };
+        let analysis = infer_domains_from_graph(Some(&g));
+        let domain_node = analysis
+            .nodes
+            .iter()
+            .find(|n| n.base.kind == "domain")
+            .unwrap();
+        let metrics = domain_node.metrics.as_ref().unwrap();
+        assert_eq!(metrics.file_count, 1);
+        // key_concepts/risks are None (template fallback can't infer them)
+        assert!(domain_node.key_concepts.is_none());
+        assert!(domain_node.risks.is_none());
     }
 
     #[test]
